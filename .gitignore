@@ -1,0 +1,12 @@
+node_modules
+dist
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+.vercel
+
+# Private/local meeting recordings and derived test clips
+*.mp3
+*.m4a
+*.wav
+*.ogg
