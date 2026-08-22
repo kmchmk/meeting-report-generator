@@ -1,11 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowDownToLine, Check, CheckCircle2, ChevronRight, Clock3, FileAudio, FileText, LockKeyhole, RotateCcw, ShieldCheck, Sparkles, Upload, Users, WandSparkles, X } from 'lucide-react'
+import { ArrowDownToLine, Check, CheckCircle2, ChevronRight, Clock3, Cloud, FileAudio, FileText, LockKeyhole, RotateCcw, ShieldCheck, Sparkles, Upload, Users, WandSparkles, X } from 'lucide-react'
 import { decodeAudio, formatDuration, getAudioLimits, readAudioDuration, validateAudioDuration, validateAudioSelection } from './lib/audio'
-import { generateReport, type MeetingReport } from './lib/gemma'
-import { calculateOverallProgress, createProgressSteps, formatBytes, type ProgressEvent, type ProgressStep } from './progress'
+import { generateReport } from './lib/gemma'
+import { generateReportRemote, transcribeRemote } from './lib/groq'
+import type { MeetingReport } from './lib/report-core'
+import { calculateOverallProgress, createProgressSteps, formatBytes, type EngineMode, type ProgressEvent, type ProgressStep } from './progress'
 import type { AsrModelId, TranscriptResult } from './types'
 
 type Stage = 'idle' | 'ready' | 'processing' | 'done' | 'error'
+
+const ENGINE_OPTIONS: Array<{ id: EngineMode; name: string; detail: string; badge: string }> = [
+  { id: 'local', name: 'ประมวลผลในเครื่อง (Offline)', detail: 'ข้อมูลไม่ออกจากอุปกรณ์ · ดาวน์โหลดโมเดลครั้งแรกประมาณ 650 MB–1.6 GB', badge: 'ความเป็นส่วนตัวสูงสุด' },
+  { id: 'cloud', name: 'ประมวลผลผ่านคลาวด์ (Groq)', detail: 'เร็วและไม่ต้องดาวน์โหลดโมเดล · เสียงจะถูกส่งไปถอดข้อความบนคลาวด์', badge: 'เริ่มใช้งานทันที' },
+]
 
 const ASR_MODELS: Array<{ id: AsrModelId; name: string; detail: string; badge?: string }> = [
   { id: 'small', name: 'Whisper Small', detail: 'เร็วกว่า · ดาวน์โหลดประมาณ 650 MB', badge: 'แนะนำสำหรับทั่วไป' },
@@ -38,6 +45,7 @@ export default function App() {
   const [tab, setTab] = useState<'report' | 'transcript'>('report')
   const [dragging, setDragging] = useState(false)
   const [asrModel, setAsrModel] = useState<AsrModelId>('small')
+  const [engine, setEngine] = useState<EngineMode>('local')
   const workerRef = useRef<Worker | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory
@@ -73,31 +81,36 @@ export default function App() {
 
   async function processMeeting() {
     if (!file) return
-    if (!('gpu' in navigator)) {
-      setError('เบราว์เซอร์นี้ยังไม่รองรับ WebGPU กรุณาใช้ Chrome หรือ Edge เวอร์ชันล่าสุด')
+    if (engine === 'local' && !('gpu' in navigator)) {
+      setError('เบราว์เซอร์นี้ยังไม่รองรับ WebGPU กรุณาใช้ Chrome หรือ Edge เวอร์ชันล่าสุด หรือสลับไปโหมดคลาวด์')
       setStage('error'); return
     }
     try {
-      setStage('processing'); setSteps(createProgressSteps(transcript ? 'transcription' : undefined)); setError('')
+      setStage('processing'); setSteps(createProgressSteps(engine, transcript ? 'transcription' : undefined)); setError('')
       let result = transcript
       if (!result) {
         updateProgress({ step: 'audio', progress: null, status: 'active', detail: 'กำลังถอดรหัสและแปลงเสียงเป็น 16 kHz…' })
         const { samples } = await decodeAudio(file)
         updateProgress({ step: 'audio', progress: 100, status: 'done', detail: 'เตรียมไฟล์เสียงเรียบร้อย' })
-        const worker = new Worker(new URL('./workers/asr.worker.ts', import.meta.url), { type: 'module' })
-        workerRef.current = worker
-        result = await new Promise<TranscriptResult>((resolve, reject) => {
-          worker.onmessage = ({ data }) => {
-            if (data.type === 'progress') updateProgress(data as ProgressEvent & { type: 'progress' })
-            if (data.type === 'complete') resolve(data.result)
-            if (data.type === 'error') reject(new Error(data.message))
-          }
-          worker.onerror = (event) => reject(new Error(event.message))
-          worker.postMessage({ type: 'transcribe', audio: samples, model: asrModel }, [samples.buffer])
-        })
-        worker.terminate(); workerRef.current = null; setTranscript(result)
+        result = engine === 'cloud'
+          ? await transcribeRemote(samples, updateProgress)
+          : await new Promise<TranscriptResult>((resolve, reject) => {
+            const worker = new Worker(new URL('./workers/asr.worker.ts', import.meta.url), { type: 'module' })
+            workerRef.current = worker
+            worker.onmessage = ({ data }) => {
+              if (data.type === 'progress') updateProgress(data as ProgressEvent & { type: 'progress' })
+              if (data.type === 'complete') resolve(data.result)
+              if (data.type === 'error') reject(new Error(data.message))
+            }
+            worker.onerror = (event) => reject(new Error(event.message))
+            worker.postMessage({ type: 'transcribe', audio: samples, model: asrModel }, [samples.buffer])
+          })
+        if (engine === 'local') { workerRef.current?.terminate(); workerRef.current = null }
+        setTranscript(result)
       }
-      const generated = await generateReport(result.text, updateProgress)
+      const generated = engine === 'cloud'
+        ? await generateReportRemote(result.text, updateProgress)
+        : await generateReport(result.text, updateProgress)
       setReport(generated); setStage('done')
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : 'เกิดข้อผิดพลาดในการประมวลผล'
@@ -109,7 +122,7 @@ export default function App() {
 
   function reset() {
     workerRef.current?.terminate(); workerRef.current = null
-    setFile(null); setDuration(0); setStage('idle'); setSteps(createProgressSteps()); setTranscript(null); setReport(null); setError('')
+    setFile(null); setDuration(0); setStage('idle'); setSteps(createProgressSteps(engine)); setTranscript(null); setReport(null); setError('')
   }
 
   function download() {
@@ -120,11 +133,12 @@ export default function App() {
   }
 
   const activeReport = report ?? (stage === 'idle' ? demoReport : null)
+  const cloudMode = engine === 'cloud'
 
   return <div className="app-shell">
     <header>
-      <a className="brand" href="#"><span className="brand-mark"><Sparkles size={17}/></span><span>สรุป</span><small>LOCAL</small></a>
-      <div className="privacy-pill"><span></span><LockKeyhole size={14}/> ข้อมูลอยู่ในเครื่องคุณเท่านั้น</div>
+      <a className="brand" href="#"><span className="brand-mark"><Sparkles size={17}/></span><span>สรุป</span><small>{cloudMode ? 'HYBRID' : 'LOCAL'}</small></a>
+      <div className="privacy-pill"><span></span>{cloudMode ? <><Cloud size={14}/> ถอดเสียงและสรุปผ่านคลาวด์ Groq</> : <><LockKeyhole size={14}/> ข้อมูลอยู่ในเครื่องคุณเท่านั้น</>}</div>
       <button className="about">ทำงานอย่างไร <ChevronRight size={15}/></button>
     </header>
 
@@ -132,8 +146,10 @@ export default function App() {
       <section className="hero">
         <div className="eyebrow"><ShieldCheck size={15}/> PRIVATE MEETING INTELLIGENCE</div>
         <h1>เปลี่ยนเสียงประชุม<br/>เป็น<span>ความชัดเจน</span></h1>
-        <p>ถอดเสียงภาษาไทยและสร้างรายงานอย่างละเอียด<br/>ประมวลผลบนอุปกรณ์ของคุณ 100%</p>
-        <div className="trust-row"><span><Check/>ไม่อัปโหลดไฟล์</span><span><Check/>ไม่ต้องสมัครสมาชิก</span><span><Check/>ใช้งานได้ฟรี</span></div>
+        <p>ถอดเสียงภาษาไทยและสร้างรายงานอย่างละเอียด<br/>{cloudMode ? 'เริ่มทันทีไม่ต้องดาวน์โหลดโมเดล' : 'ประมวลผลบนอุปกรณ์ของคุณ 100%'}</p>
+        <div className="trust-row">{cloudMode
+          ? <><span><Check/>ใช้งานฟรี</span><span><Check/>ไม่ต้องดาวน์โหลดโมเดล</span><span><Check/>สลับกลับโหมด Offline ได้</span></>
+          : <><span><Check/>ไม่อัปโหลดไฟล์</span><span><Check/>ไม่ต้องสมัครสมาชิก</span><span><Check/>ใช้งานได้ฟรี</span></>}</div>
       </section>
 
       <section className="workspace">
@@ -153,7 +169,24 @@ export default function App() {
             <div className="waveform">{Array.from({length: 34}).map((_,i)=><i key={i} style={{height: `${18 + ((i * 13) % 28)}%`}}/>)}</div>
           </div>}
 
-          {file && <div className="model-selector" role="radiogroup" aria-label="เลือกโมเดลถอดเสียง">
+          {file && <div className="model-selector" role="radiogroup" aria-label="เลือกวิธีประมวลผล">
+            <div className="model-selector-heading"><strong>วิธีการประมวลผล</strong><span>เลือกได้ก่อนเริ่มทุกครั้ง</span></div>
+            <div className="model-options">{ENGINE_OPTIONS.map((option) => <label className={engine === option.id ? 'selected' : ''} key={option.id}>
+              <input
+                type="radio"
+                name="engine-mode"
+                value={option.id}
+                checked={engine === option.id}
+                disabled={stage === 'processing' || stage === 'done'}
+                onChange={() => { setEngine(option.id); setTranscript(null); setReport(null); setError('') }}
+              />
+              <span className="model-radio"></span>
+              <span className="model-copy"><strong>{option.name}</strong><small>{option.detail}</small></span>
+              <em>{option.badge}</em>
+            </label>)}</div>
+          </div>}
+
+          {file && engine === 'local' && <div className="model-selector" role="radiogroup" aria-label="เลือกโมเดลถอดเสียง">
             <div className="model-selector-heading"><strong>โมเดลถอดเสียง</strong><span>ทั้งสองโมเดลทำงานในเครื่อง</span></div>
             <div className="model-options">{ASR_MODELS.map((model) => <label className={asrModel === model.id ? 'selected' : ''} key={model.id}>
               <input
@@ -173,7 +206,9 @@ export default function App() {
           {(stage === 'processing' || stage === 'done' || (stage === 'error' && steps.some((step) => step.status === 'error'))) && <ProcessingProgress steps={steps}/>} 
           {error && <div className="error-box">{error}</div>}
           <button className="primary-button" disabled={!file || stage === 'processing' || stage === 'done'} onClick={processMeeting}><WandSparkles size={18}/>{stage === 'processing' ? 'กำลังประมวลผล…' : transcript && !report ? 'ลองสร้างรายงานอีกครั้ง' : stage === 'done' ? 'สร้างรายงานเรียบร้อย' : 'สร้างรายงานการประชุม'}<ChevronRight size={18}/></button>
-          <div className="local-note"><LockKeyhole size={15}/><div><strong>ประมวลผลแบบ Local</strong><span>เสียงและเนื้อหาจะไม่ออกจากอุปกรณ์นี้</span></div></div>
+          <div className="local-note">{cloudMode
+            ? <><Cloud size={15}/><div><strong>ประมวลผลผ่านคลาวด์ (Groq)</strong><span>เสียงจะถูกแปลงเป็นข้อความด้วย Whisper Large V3 และสรุปด้วย Llama 3.3 70B บนคลาวด์</span></div></>
+            : <><LockKeyhole size={15}/><div><strong>ประมวลผลแบบ Local</strong><span>เสียงและเนื้อหาจะไม่ออกจากอุปกรณ์นี้</span></div></>}</div>
         </div>
 
         <div className="panel report-panel">
@@ -183,9 +218,11 @@ export default function App() {
         </div>
       </section>
 
-      <div className="engine-note"><span>POWERED LOCALLY BY</span><b>Gemma 4 E2B</b><i></i><b>LiteRT-LM</b><i></i><b>WebGPU</b></div>
+      <div className="engine-note">{cloudMode
+        ? <><span>POWERED BY</span><b>Groq</b><i></i><b>Whisper Large V3</b><i></i><b>Llama 3.3 70B</b></>
+        : <><span>POWERED LOCALLY BY</span><b>Gemma 4 E2B</b><i></i><b>LiteRT-LM</b><i></i><b>WebGPU</b></>}</div>
     </main>
-    <footer><span>สรุป · Local-first meeting intelligence</span><span>ไม่มีเซิร์ฟเวอร์ · ไม่มีการติดตาม · ไม่มีข้อมูลรั่วไหล</span></footer>
+    <footer><span>สรุป · Local-first meeting intelligence</span><span>{cloudMode ? 'โหมดคลาวด์ผ่าน Groq · สลับเป็น Offline ได้ทุกเมื่อ' : 'ไม่มีเซิร์ฟเวอร์ · ไม่มีการติดตาม · ไม่มีข้อมูลรั่วไหล'}</span></footer>
   </div>
 }
 

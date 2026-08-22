@@ -1,19 +1,23 @@
 # สรุป (Saroop Local)
 
-Privacy-first Thai meeting transcription and reporting that runs entirely in the browser.
+Thai meeting transcription and reporting with two interchangeable engines: a privacy-first offline mode that runs entirely in the browser, and a free cloud mode powered by Groq.
 
 ## Architecture
 
-- Thai speech-to-text: multilingual Whisper Small via Transformers.js + WebGPU, isolated in a Web Worker.
-- Report generation: Gemma 4 E2B via the early-preview LiteRT-LM Web API.
-- Audio, transcript, and report stay in browser memory. There are no API routes, analytics, accounts, or uploads.
-- Model weights are downloaded from Hugging Face on first use and cached by the browser.
-- Audio selection reads metadata only. The file is decoded once when processing starts, mixed to mono at 16 kHz, and transferred to the transcription worker.
-- File duration limits adapt to the browser's reported device memory (30–120 minutes) with a 250 MB compressed-file ceiling.
-- Long transcripts are reduced sequentially in bounded recursive passes before final report synthesis.
-- Gemma output is schema-validated and receives one constrained JSON-repair attempt before a recoverable error is shown.
+- **Engine selector**: pick per run between local (offline) and cloud (Groq) processing.
+- **Offline mode** (default)
+  - Thai speech-to-text: multilingual Whisper Small / Large V3 Turbo via Transformers.js + WebGPU, isolated in a Web Worker.
+  - Report generation: Gemma 4 E2B via the early-preview LiteRT-LM Web API.
+  - Audio, transcript, and report stay in browser memory. Model weights are downloaded from Hugging Face on first use and cached by the browser.
+- **Cloud mode** (Groq free tier)
+  - Speech-to-text: Whisper Large V3 via `api/transcribe.ts` (audio is decoded locally, converted to mono 16 kHz WAV, and uploaded in ~100-second chunks).
+  - Report generation: Llama 3.3 70B via `api/report.ts`, which streams NDJSON progress events while reducing long transcripts sequentially in bounded passes before final synthesis.
+  - Both endpoints are thin proxies; the Groq API key never reaches the browser. Reports are schema-validated server-side and again on the client.
+- Shared reduction/validation logic lives in `src/lib/report-core.ts` and is used identically by both engines.
+- Long transcripts are reduced sequentially before final report synthesis; output receives one constrained JSON-repair attempt before a recoverable error is shown.
+- Audio selection reads metadata only. The file is decoded once when processing starts, mixed to mono at 16 kHz, then either transferred to the transcription worker or chunked for upload.
 
-> LiteRT-LM's current Web API is text-in/text-out only. Its native runtimes support audio, but the browser runtime does not yet expose audio input. Whisper is therefore the local ASR layer while Gemma produces the report.
+> Cloud mode sends audio and transcripts to Groq's servers. For confidential meetings use offline mode. Groq's free tier has rate limits (requests/minute and audio seconds/day), so concurrent or back-to-back runs may need to wait.
 
 ## Development
 
@@ -22,7 +26,18 @@ npm install
 npm run dev
 ```
 
-Use a recent Chrome or Edge build with WebGPU. The initial model downloads are large and can take several minutes.
+Offline mode works directly under `npm run dev`. Use a recent Chrome or Edge build with WebGPU; initial model downloads are large and can take several minutes.
+
+To exercise cloud mode locally you need the Vercel functions:
+
+```bash
+npx vercel login
+npx vercel link
+npx vercel env add GROQ_API_KEY   # paste a key from https://console.groq.com
+npx vercel dev                    # serves the Vite app + api/ routes together
+```
+
+Get a free API key at https://console.groq.com. Never commit `.env.local` or real keys.
 
 ## Validation
 
@@ -32,8 +47,8 @@ npm run lint
 npm run build
 ```
 
-The browser pipeline was also validated locally with a one-minute segment from a real Thai meeting recording: Whisper completed transcription, Gemma initialized with WebGPU, and a schema-valid report rendered successfully. Accuracy still depends on recording clarity, overlapping speakers, and the Whisper Small model's Thai-language capability.
+The browser pipeline was validated locally with a one-minute segment from a real Thai meeting recording: Whisper completed transcription, Gemma initialized with WebGPU, and a schema-valid report rendered successfully. Accuracy still depends on recording clarity, overlapping speakers, and the ASR model's Thai-language capability.
 
 ## Deploy to Vercel
 
-Import the repository into Vercel. `vercel.json` already configures the Vite build and cross-origin isolation headers needed by browser ML runtimes.
+Import the repository into Vercel and set the `GROQ_API_KEY` environment variable (Project → Settings → Environment Variables) to enable cloud mode; offline mode works without any configuration. `vercel.json` configures the Vite build, function durations (`api/report.ts` needs up to 300 s — enable Fluid compute on Hobby), and the cross-origin isolation headers needed by browser ML runtimes.

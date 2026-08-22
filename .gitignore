@@ -10,3 +10,8 @@ vite.config.d.ts
 *.m4a
 *.wav
 *.ogg
+
+# Environment variables
+.env
+.env.local
+.env.*.local

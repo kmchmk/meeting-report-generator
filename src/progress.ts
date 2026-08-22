@@ -1,5 +1,8 @@
 export type ProgressStepId = 'audio' | 'whisper-model' | 'transcription' | 'gemma-download' | 'gemma-compile' | 'report'
 export type ProgressStatus = 'pending' | 'active' | 'done' | 'error'
+export type EngineMode = 'local' | 'cloud'
+
+const CLOUD_ONLY_STEPS: ReadonlySet<ProgressStepId> = new Set(['whisper-model', 'gemma-download', 'gemma-compile'])
 
 export type ProgressStep = {
   id: ProgressStepId
@@ -38,22 +41,27 @@ const STEP_WEIGHTS: Record<ProgressStepId, number> = {
   report: 10,
 }
 
-export function createProgressSteps(completedThrough?: ProgressStepId): ProgressStep[] {
+export function createProgressSteps(mode: EngineMode = 'local', completedThrough?: ProgressStepId): ProgressStep[] {
   const completedIndex = completedThrough ? STEP_DEFINITIONS.findIndex(({ id }) => id === completedThrough) : -1
-  return STEP_DEFINITIONS.map(({ id, label }, index) => ({
-    id,
-    label,
-    detail: index <= completedIndex ? 'พร้อมใช้งานแล้ว' : 'รอดำเนินการ',
-    progress: index <= completedIndex ? 100 : 0,
-    status: index <= completedIndex ? 'done' : 'pending',
-  }))
+  return STEP_DEFINITIONS
+    .filter(({ id }) => mode === 'local' || !CLOUD_ONLY_STEPS.has(id))
+    .map(({ id, label }, index) => ({
+      id,
+      label: mode === 'cloud' && id === 'transcription' ? 'ถอดเสียงผ่านคลาวด์ (Groq)' : label,
+      detail: index <= completedIndex ? 'พร้อมใช้งานแล้ว' : 'รอดำเนินการ',
+      progress: index <= completedIndex ? 100 : 0,
+      status: index <= completedIndex ? 'done' : 'pending',
+    }))
 }
 
 export function calculateOverallProgress(steps: ProgressStep[]) {
-  return steps.reduce((total, step) => {
+  let totalWeight = 0
+  const weighted = steps.reduce((total, step) => {
     const value = step.status === 'done' ? 100 : step.progress ?? 0
+    totalWeight += STEP_WEIGHTS[step.id]
     return total + STEP_WEIGHTS[step.id] * Math.max(0, Math.min(100, value)) / 100
   }, 0)
+  return totalWeight > 0 ? weighted * 100 / totalWeight : 0
 }
 
 export function formatBytes(bytes?: number) {

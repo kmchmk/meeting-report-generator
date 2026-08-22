@@ -3,7 +3,7 @@ import { calculateOverallProgress, createProgressSteps, formatBytes } from './pr
 
 describe('processing progress', () => {
   it('calculates weighted overall progress', () => {
-    const steps = createProgressSteps('whisper-model')
+    const steps = createProgressSteps('local', 'whisper-model')
     const transcription = steps.find((step) => step.id === 'transcription')!
     transcription.status = 'active'
     transcription.progress = 50
@@ -11,11 +11,20 @@ describe('processing progress', () => {
   })
 
   it('does not pretend an indeterminate step has measurable progress', () => {
-    const steps = createProgressSteps('gemma-download')
+    const steps = createProgressSteps('local', 'gemma-download')
     const compile = steps.find((step) => step.id === 'gemma-compile')!
     compile.status = 'active'
     compile.progress = null
     expect(calculateOverallProgress(steps)).toBe(82)
+  })
+
+  it('omits model download steps in cloud mode and normalizes overall progress', () => {
+    const steps = createProgressSteps('cloud')
+    expect(steps.map((step) => step.id)).toEqual(['audio', 'transcription', 'report'])
+    expect(steps[1].label).toBe('ถอดเสียงผ่านคลาวด์ (Groq)')
+    steps[1].status = 'active'
+    steps[1].progress = 50
+    expect(calculateOverallProgress(steps)).toBeCloseTo(100 * (30 * 0.5) / 45, 5)
   })
 
   it('formats model download sizes', () => {
