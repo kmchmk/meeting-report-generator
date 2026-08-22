@@ -3,7 +3,7 @@ import { ArrowDownToLine, Check, CheckCircle2, ChevronRight, Clock3, Cloud, File
 import { decodeAudio, formatDuration, getAudioLimits, readAudioDuration, validateAudioDuration, validateAudioSelection } from './lib/audio'
 import { generateReport } from './lib/gemma'
 import { generateReportRemote, transcribeRemote } from './lib/groq'
-import type { MeetingReport } from './lib/report-core'
+import type { MeetingReport } from '../api/_lib/report-core'
 import { calculateOverallProgress, createProgressSteps, formatBytes, type EngineMode, type ProgressEvent, type ProgressStep } from './progress'
 import type { AsrModelId, TranscriptResult } from './types'
 

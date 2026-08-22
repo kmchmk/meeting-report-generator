@@ -9,5 +9,5 @@
     "lib": ["ES2022", "DOM"],
     "noEmit": true
   },
-  "include": ["vite.config.ts", "api/**/*.ts", "src/lib/report-core.ts"]
+  "include": ["vite.config.ts", "api/**/*.ts"]
 }

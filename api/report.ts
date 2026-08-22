@@ -7,7 +7,7 @@ import {
   parseMeetingReport,
   reduceTranscriptSequentially,
   type MeetingReport,
-} from '../src/lib/report-core'
+} from './_lib/report-core'
 
 export const maxDuration = 300
 

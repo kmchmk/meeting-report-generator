@@ -1,6 +1,6 @@
 import type { ProgressEvent } from '../progress'
 import type { TranscriptResult } from '../types'
-import { validateMeetingReport, type MeetingReport } from './report-core'
+import { validateMeetingReport, type MeetingReport } from '../../api/_lib/report-core'
 
 export const SAMPLE_RATE = 16_000
 export const CHUNK_SECONDS = 100

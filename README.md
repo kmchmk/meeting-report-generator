@@ -13,7 +13,7 @@ Thai meeting transcription and reporting with two interchangeable engines: a pri
   - Speech-to-text: Whisper Large V3 via `api/transcribe.ts` (audio is decoded locally, converted to mono 16 kHz WAV, and uploaded in ~100-second chunks).
   - Report generation: Llama 3.3 70B via `api/report.ts`, which streams NDJSON progress events while reducing long transcripts sequentially in bounded passes before final synthesis.
   - Both endpoints are thin proxies; the Groq API key never reaches the browser. Reports are schema-validated server-side and again on the client.
-- Shared reduction/validation logic lives in `src/lib/report-core.ts` and is used identically by both engines.
+- Shared reduction/validation logic lives in `api/_lib/report-core.ts` and is used identically by both engines (kept inside `api/` so serverless bundles always include it).
 - Long transcripts are reduced sequentially before final report synthesis; output receives one constrained JSON-repair attempt before a recoverable error is shown.
 - Audio selection reads metadata only. The file is decoded once when processing starts, mixed to mono at 16 kHz, then either transferred to the transcription worker or chunked for upload.
 

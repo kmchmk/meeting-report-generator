@@ -8,7 +8,7 @@ import {
   parseMeetingReport,
   reduceTranscriptSequentially,
   type MeetingReport,
-} from './report-core'
+} from '../../api/_lib/report-core'
 import { teeStreamWithBackpressure } from './streams'
 
 export type { MeetingReport }
