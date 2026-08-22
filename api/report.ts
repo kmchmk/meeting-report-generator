@@ -1,3 +1,4 @@
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import {
   SECRETARY_SYSTEM_PROMPT,
   buildFinalReportPrompt,
@@ -54,76 +55,103 @@ async function complete(apiKey: string, prompt: string, maxTokens: number, jsonM
   return output
 }
 
-export default async function handler(request: Request): Promise<Response> {
-  if (request.method !== 'POST') return Response.json({ error: 'ต้องใช้เมธอด POST เท่านั้น' }, { status: 405 })
+function readJsonBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk: Buffer) => chunks.push(chunk))
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    req.on('error', reject)
+  })
+}
+
+export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== 'POST') {
+    res.statusCode = 405
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(JSON.stringify({ error: 'ต้องใช้เมธอด POST เท่านั้น' }))
+    return
+  }
 
   const apiKey = process.env.GROQ_API_KEY
-  if (!apiKey) return Response.json({ error: 'เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า GROQ_API_KEY' }, { status: 500 })
+  if (!apiKey) {
+    res.statusCode = 500
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(JSON.stringify({ error: 'เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า GROQ_API_KEY' }))
+    return
+  }
 
   let transcript = ''
   try {
-    const body = await request.json() as { transcript?: unknown }
-    if (typeof body.transcript === 'string') transcript = body.transcript
+    const rawBody = JSON.parse(await readJsonBody(req)) as { transcript?: unknown }
+    if (typeof rawBody.transcript === 'string') transcript = rawBody.transcript
   } catch {
-    return Response.json({ error: 'รูปแบบคำขอไม่ถูกต้อง' }, { status: 400 })
+    res.statusCode = 400
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(JSON.stringify({ error: 'รูปแบบคำขอไม่ถูกต้อง' }))
+    return
   }
   transcript = transcript.trim()
-  if (!transcript) return Response.json({ error: 'ไม่พบบทถอดเสียงในคำขอ' }, { status: 400 })
-  if (transcript.length > MAX_TRANSCRIPT_CHARS) return Response.json({ error: 'บทถอดเสียงยาวเกินที่โหมดคลาวด์รองรับ กรุณาแบ่งไฟล์เสียง' }, { status: 413 })
+  if (!transcript) {
+    res.statusCode = 400
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(JSON.stringify({ error: 'ไม่พบบทถอดเสียงในคำขอ' }))
+    return
+  }
+  if (transcript.length > MAX_TRANSCRIPT_CHARS) {
+    res.statusCode = 413
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(JSON.stringify({ error: 'บทถอดเสียงยาวเกินที่โหมดคลาวด์รองรับ กรุณาแบ่งไฟล์เสียง' }))
+    return
+  }
 
-  const encoder = new TextEncoder()
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      let closed = false
-      const send = (event: Record<string, unknown>) => {
-        if (closed) return
-        controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`))
-      }
-      const progress = (stepProgress: number | null, detail: string) => {
-        send({ type: 'progress', event: { step: 'report', progress: stepProgress, status: 'active', detail } })
-      }
+  res.writeHead(200, {
+    'content-type': 'application/x-ndjson; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-accel-buffering': 'no',
+  })
+  const send = (event: Record<string, unknown>) => {
+    if (res.writableEnded || res.destroyed) throw new Error('client-disconnected')
+    res.write(`${JSON.stringify(event)}\n`)
+  }
+  const progress = (stepProgress: number | null, detail: string) => {
+    send({ type: 'progress', event: { step: 'report', progress: stepProgress, status: 'active', detail } })
+  }
+
+  try {
+    progress(0, 'กำลังเตรียมบทถอดเสียงสำหรับสรุป…')
+    let reportProgress = 0
+    const source = await reduceTranscriptSequentially(transcript, async (part, index, total, pass) => {
+      const detail = `กำลังย่อบทถอดเสียง รอบ ${pass} ส่วน ${index + 1} จาก ${total} (ผ่าน Groq)`
+      progress(Math.min(45, reportProgress + 2), detail)
+      const summary = await complete(apiKey, buildSummarizePrompt(part, index, total, pass), 512, false)
+      reportProgress = Math.min(50, reportProgress + 5)
+      progress(reportProgress, `ย่อส่วน ${index + 1} จาก ${total} เรียบร้อย`)
+      return summary
+    })
+
+    progress(Math.max(50, reportProgress), 'กำลังเรียบเรียงรายงานฉบับสมบูรณ์…')
+    const raw = await complete(apiKey, buildFinalReportPrompt(source), 2_048, true)
+    let report: MeetingReport
+    try {
+      report = parseMeetingReport(raw)
+    } catch (initialError) {
+      progress(95, 'กำลังตรวจและซ่อมรูปแบบรายงาน…')
+      const repaired = await complete(apiKey, buildRepairPrompt(raw), 2_048, true)
       try {
-        progress(0, 'กำลังเตรียมบทถอดเสียงสำหรับสรุป…')
-        let reportProgress = 0
-        const source = await reduceTranscriptSequentially(transcript, async (part, index, total, pass) => {
-          const detail = `กำลังย่อบทถอดเสียง รอบ ${pass} ส่วน ${index + 1} จาก ${total} (ผ่าน Groq)`
-          progress(Math.min(45, reportProgress + 2), detail)
-          const summary = await complete(apiKey, buildSummarizePrompt(part, index, total, pass), 512, false)
-          reportProgress = Math.min(50, reportProgress + 5)
-          progress(reportProgress, `ย่อส่วน ${index + 1} จาก ${total} เรียบร้อย`)
-          return summary
-        })
-
-        progress(Math.max(50, reportProgress), 'กำลังเรียบเรียงรายงานฉบับสมบูรณ์…')
-        const raw = await complete(apiKey, buildFinalReportPrompt(source), 2_048, true)
-        let report: MeetingReport
-        try {
-          report = parseMeetingReport(raw)
-        } catch (initialError) {
-          progress(95, 'กำลังตรวจและซ่อมรูปแบบรายงาน…')
-          const repaired = await complete(apiKey, buildRepairPrompt(raw), 2_048, true)
-          try {
-            report = parseMeetingReport(repaired)
-          } catch (repairError) {
-            throw new Error(`สร้างบทถอดเสียงสำเร็จ แต่รายงานยังมีรูปแบบไม่ถูกต้อง (${initialError instanceof Error ? initialError.message : String(initialError)}; ${repairError instanceof Error ? repairError.message : String(repairError)})`)
-          }
-        }
-        send({ type: 'progress', event: { step: 'report', progress: 100, status: 'done', detail: 'สร้างรายงานเรียบร้อย' } })
-        send({ type: 'report', report })
-      } catch (error) {
-        send({ type: 'error', message: error instanceof Error ? error.message : String(error) })
-      } finally {
-        closed = true
-        controller.close()
+        report = parseMeetingReport(repaired)
+      } catch (repairError) {
+        throw new Error(`สร้างบทถอดเสียงสำเร็จ แต่รายงานยังมีรูปแบบไม่ถูกต้อง (${initialError instanceof Error ? initialError.message : String(initialError)}; ${repairError instanceof Error ? repairError.message : String(repairError)})`)
       }
-    },
-  })
-
-  return new Response(stream, {
-    headers: {
-      'content-type': 'application/x-ndjson; charset=utf-8',
-      'cache-control': 'no-store',
-      'x-accel-buffering': 'no',
-    },
-  })
+    }
+    send({ type: 'progress', event: { step: 'report', progress: 100, status: 'done', detail: 'สร้างรายงานเรียบร้อย' } })
+    send({ type: 'report', report })
+  } catch (error) {
+    if (!(error instanceof Error && error.message === 'client-disconnected')) {
+      try {
+        send({ type: 'error', message: error instanceof Error ? error.message : String(error) })
+      } catch { /* client already gone */ }
+    }
+  } finally {
+    res.end()
+  }
 }

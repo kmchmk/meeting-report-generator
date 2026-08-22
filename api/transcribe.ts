@@ -1,28 +1,58 @@
+import type { IncomingMessage, ServerResponse } from 'node:http'
+
 export const maxDuration = 60
 
 const GROQ_TRANSCRIBE_URL = 'https://api.groq.com/openai/v1/audio/transcriptions'
 const GROQ_ASR_MODEL = 'whisper-large-v3'
 const MAX_UPLOAD_BYTES = 4_400_000
 
-function jsonResponse(body: Record<string, unknown>, status: number) {
-  return Response.json(body, { status, headers: { 'cache-control': 'no-store' } })
+function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>) {
+  res.statusCode = status
+  res.setHeader('content-type', 'application/json; charset=utf-8')
+  res.setHeader('cache-control', 'no-store')
+  res.end(JSON.stringify(body))
 }
 
-export default async function handler(request: Request): Promise<Response> {
-  if (request.method !== 'POST') return jsonResponse({ error: 'ต้องใช้เมธอด POST เท่านั้น' }, 405)
+function readBody(req: IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let received = 0
+    req.on('data', (chunk: Buffer) => {
+      received += chunk.length
+      if (received > MAX_UPLOAD_BYTES) {
+        reject(new Error('payload-too-large'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks)))
+    req.on('error', reject)
+  })
+}
+
+export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== 'POST') { sendJson(res, 405, { error: 'ต้องใช้เมธอด POST เท่านั้น' }); return }
 
   const apiKey = process.env.GROQ_API_KEY
-  if (!apiKey) return jsonResponse({ error: 'เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า GROQ_API_KEY' }, 500)
+  if (!apiKey) { sendJson(res, 500, { error: 'เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า GROQ_API_KEY' }); return }
 
-  const contentLength = Number(request.headers.get('content-length')) || 0
-  if (contentLength > MAX_UPLOAD_BYTES) return jsonResponse({ error: 'ไฟล์เสียงช่วงนี้ใหญ่เกินที่เซิร์ฟเวอร์รับได้' }, 413)
-
-  const audio = await request.arrayBuffer()
-  if (audio.byteLength === 0) return jsonResponse({ error: 'ไม่พบข้อมูลเสียงในคำขอ' }, 400)
-  if (audio.byteLength > MAX_UPLOAD_BYTES) return jsonResponse({ error: 'ไฟล์เสียงช่วงนี้ใหญ่เกินที่เซิร์ฟเวอร์รับได้' }, 413)
+  let audio: Buffer
+  try {
+    audio = await readBody(req)
+  } catch (error) {
+    if (error instanceof Error && error.message === 'payload-too-large') {
+      sendJson(res, 413, { error: 'ไฟล์เสียงช่วงนี้ใหญ่เกินที่เซิร์ฟเวอร์รับได้' })
+      return
+    }
+    sendJson(res, 400, { error: 'ไม่สามารถอ่านข้อมูลเสียงในคำขอได้' })
+    return
+  }
+  if (audio.byteLength === 0) { sendJson(res, 400, { error: 'ไม่พบข้อมูลเสียงในคำขอ' }); return }
+  if (audio.byteLength > MAX_UPLOAD_BYTES) { sendJson(res, 413, { error: 'ไฟล์เสียงช่วงนี้ใหญ่เกินที่เซิร์ฟเวอร์รับได้' }); return }
 
   const form = new FormData()
-  form.append('file', new Blob([audio], { type: 'audio/wav' }), 'chunk.wav')
+  form.append('file', new Blob([new Uint8Array(audio)], { type: 'audio/wav' }), 'chunk.wav')
   form.append('model', GROQ_ASR_MODEL)
   form.append('language', 'th')
   form.append('temperature', '0')
@@ -36,7 +66,8 @@ export default async function handler(request: Request): Promise<Response> {
       body: form,
     })
   } catch {
-    return jsonResponse({ error: 'เชื่อมต่อบริการถอดเสียง (Groq) ไม่สำเร็จ กรุณาลองอีกครั้ง' }, 502)
+    sendJson(res, 502, { error: 'เชื่อมต่อบริการถอดเสียง (Groq) ไม่สำเร็จ กรุณาลองอีกครั้ง' })
+    return
   }
 
   if (!groqResponse.ok) {
@@ -45,19 +76,18 @@ export default async function handler(request: Request): Promise<Response> {
       const data = await groqResponse.json() as { error?: { message?: unknown } }
       detail = typeof data.error?.message === 'string' ? data.error.message : ''
     } catch { /* keep empty detail */ }
-    const rateLimited = groqResponse.status === 429
-    return jsonResponse({
-      error: rateLimited
-        ? 'บริการถอดเสียงฟรีถึงขีดจำกัดชั่วคราว กรุณารอสักครู่แล้วลองอีกครั้ง'
-        : `บริการถอดเสียงผิดพลาด (${groqResponse.status})${detail ? `: ${detail}` : ''}`,
-    }, groqResponse.status === 429 ? 429 : 502)
+    if (groqResponse.status === 429) {
+      sendJson(res, 429, { error: 'บริการถอดเสียงฟรีถึงขีดจำกัดชั่วคราว กรุณารอสักครู่แล้วลองอีกครั้ง' })
+      return
+    }
+    sendJson(res, 502, { error: `บริการถอดเสียงผิดพลาด (${groqResponse.status})${detail ? `: ${detail}` : ''}` })
+    return
   }
 
-  let payload: { text?: unknown }
   try {
-    payload = await groqResponse.json() as { text?: unknown }
+    const payload = await groqResponse.json() as { text?: unknown }
+    sendJson(res, 200, { text: typeof payload.text === 'string' ? payload.text : '' })
   } catch {
-    return jsonResponse({ error: 'คำตอบจากบริการถอดเสียงไม่ถูกต้อง' }, 502)
+    sendJson(res, 502, { error: 'คำตอบจากบริการถอดเสียงไม่ถูกต้อง' })
   }
-  return jsonResponse({ text: typeof payload.text === 'string' ? payload.text : '' }, 200)
 }
