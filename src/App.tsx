@@ -9,14 +9,16 @@ import type { AsrModelId, TranscriptResult } from './types'
 
 type Stage = 'idle' | 'ready' | 'processing' | 'done' | 'error'
 
+const CLOUD_MODE_ENABLED = import.meta.env.VITE_ENABLE_CLOUD_MODE === 'true'
+const DEFAULT_ENGINE: EngineMode = CLOUD_MODE_ENABLED ? 'cloud' : 'local'
 const ENGINE_OPTIONS: Array<{ id: EngineMode; name: string; detail: string; badge: string }> = [
-  { id: 'local', name: 'ประมวลผลในเครื่อง (Offline)', detail: 'ข้อมูลไม่ออกจากอุปกรณ์ · ดาวน์โหลดโมเดลครั้งแรกประมาณ 650 MB–1.6 GB', badge: 'ความเป็นส่วนตัวสูงสุด' },
-  { id: 'cloud', name: 'ประมวลผลผ่านคลาวด์ (Groq)', detail: 'เร็วและไม่ต้องดาวน์โหลดโมเดล · เสียงจะถูกส่งไปถอดข้อความบนคลาวด์', badge: 'เริ่มใช้งานทันที' },
+  ...(CLOUD_MODE_ENABLED ? [{ id: 'cloud' as const, name: 'Groq · Whisper Large V3', detail: 'แม่นยำและรวดเร็ว · ใช้โควตาฟรี · ส่งเสียงและบทถอดเสียงไปยัง Groq', badge: 'แนะนำ' }] : []),
+  { id: 'local', name: 'ประมวลผลในเครื่อง (Offline)', detail: 'ข้อมูลไม่ออกจากอุปกรณ์ · ดาวน์โหลดโมเดลครั้งแรกประมาณ 650 MB–2.0 GB', badge: 'ความเป็นส่วนตัวสูงสุด' },
 ]
 
 const ASR_MODELS: Array<{ id: AsrModelId; name: string; detail: string; badge?: string }> = [
   { id: 'small', name: 'Whisper Small', detail: 'เร็วกว่า · ดาวน์โหลดประมาณ 650 MB', badge: 'แนะนำสำหรับทั่วไป' },
-  { id: 'large-v3-turbo', name: 'Whisper Large V3 Turbo', detail: 'แม่นยำกว่า · ดาวน์โหลดประมาณ 1.6 GB', badge: 'ความแม่นยำสูง' },
+  { id: 'large-v3-turbo', name: 'Whisper Large V3 Turbo', detail: 'แม่นยำกว่า · ดาวน์โหลดประมาณ 2.0 GB', badge: 'ความแม่นยำสูง' },
 ]
 
 const demoReport: MeetingReport = {
@@ -38,14 +40,15 @@ export default function App() {
   const [file, setFile] = useState<File | null>(null)
   const [duration, setDuration] = useState(0)
   const [stage, setStage] = useState<Stage>('idle')
-  const [steps, setSteps] = useState<ProgressStep[]>(createProgressSteps)
+  const [steps, setSteps] = useState<ProgressStep[]>(() => createProgressSteps(DEFAULT_ENGINE))
   const [transcript, setTranscript] = useState<TranscriptResult | null>(null)
   const [report, setReport] = useState<MeetingReport | null>(null)
   const [error, setError] = useState('')
   const [tab, setTab] = useState<'report' | 'transcript'>('report')
   const [dragging, setDragging] = useState(false)
   const [asrModel, setAsrModel] = useState<AsrModelId>('small')
-  const [engine, setEngine] = useState<EngineMode>('local')
+  const [engine, setEngine] = useState<EngineMode>(DEFAULT_ENGINE)
+  const [cloudConsent, setCloudConsent] = useState(false)
   const workerRef = useRef<Worker | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory
@@ -72,7 +75,7 @@ export default function App() {
       const selectedDuration = await readAudioDuration(selected)
       const durationError = validateAudioDuration(selectedDuration, audioLimits)
       if (durationError) { setError(durationError); setStage('error'); return }
-      setError(''); setFile(selected); setDuration(selectedDuration); setStage('ready'); setReport(null); setTranscript(null)
+      setError(''); setFile(selected); setDuration(selectedDuration); setStage('ready'); setReport(null); setTranscript(null); setCloudConsent(false)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'ไม่สามารถอ่านข้อมูลไฟล์เสียงนี้ได้')
       setStage('error')
@@ -81,8 +84,14 @@ export default function App() {
 
   async function processMeeting() {
     if (!file) return
+    if (engine === 'cloud' && !cloudConsent) {
+      setError('กรุณายืนยันก่อนว่าสามารถส่งเสียงและบทถอดเสียงไปประมวลผลที่ Groq ได้')
+      setStage('error'); return
+    }
     if (engine === 'local' && !('gpu' in navigator)) {
-      setError('เบราว์เซอร์นี้ยังไม่รองรับ WebGPU กรุณาใช้ Chrome หรือ Edge เวอร์ชันล่าสุด หรือสลับไปโหมดคลาวด์')
+      setError(CLOUD_MODE_ENABLED
+        ? 'เบราว์เซอร์นี้ยังไม่รองรับ WebGPU กรุณาใช้ Chrome หรือ Edge เวอร์ชันล่าสุด หรือสลับไปโหมดคลาวด์'
+        : 'เบราว์เซอร์นี้ยังไม่รองรับ WebGPU กรุณาใช้ Chrome หรือ Edge เวอร์ชันล่าสุดและเปิด Hardware acceleration')
       setStage('error'); return
     }
     try {
@@ -92,20 +101,26 @@ export default function App() {
         updateProgress({ step: 'audio', progress: null, status: 'active', detail: 'กำลังถอดรหัสและแปลงเสียงเป็น 16 kHz…' })
         const { samples } = await decodeAudio(file)
         updateProgress({ step: 'audio', progress: 100, status: 'done', detail: 'เตรียมไฟล์เสียงเรียบร้อย' })
-        result = engine === 'cloud'
-          ? await transcribeRemote(samples, updateProgress)
-          : await new Promise<TranscriptResult>((resolve, reject) => {
-            const worker = new Worker(new URL('./workers/asr.worker.ts', import.meta.url), { type: 'module' })
-            workerRef.current = worker
-            worker.onmessage = ({ data }) => {
-              if (data.type === 'progress') updateProgress(data as ProgressEvent & { type: 'progress' })
-              if (data.type === 'complete') resolve(data.result)
-              if (data.type === 'error') reject(new Error(data.message))
-            }
-            worker.onerror = (event) => reject(new Error(event.message))
-            worker.postMessage({ type: 'transcribe', audio: samples, model: asrModel }, [samples.buffer])
-          })
-        if (engine === 'local') { workerRef.current?.terminate(); workerRef.current = null }
+        if (engine === 'cloud') {
+          result = await transcribeRemote(samples, updateProgress)
+        } else {
+          const worker = new Worker(new URL('./workers/asr.worker.ts', import.meta.url), { type: 'module' })
+          workerRef.current = worker
+          try {
+            result = await new Promise<TranscriptResult>((resolve, reject) => {
+              worker.onmessage = ({ data }) => {
+                if (data.type === 'progress') updateProgress(data as ProgressEvent & { type: 'progress' })
+                if (data.type === 'complete') resolve(data.result)
+                if (data.type === 'error') reject(new Error(data.message))
+              }
+              worker.onerror = (event) => reject(new Error(event.message))
+              worker.postMessage({ type: 'transcribe', audio: samples, model: asrModel }, [samples.buffer])
+            })
+          } finally {
+            worker.terminate()
+            if (workerRef.current === worker) workerRef.current = null
+          }
+        }
         setTranscript(result)
       }
       const generated = engine === 'cloud'
@@ -122,7 +137,7 @@ export default function App() {
 
   function reset() {
     workerRef.current?.terminate(); workerRef.current = null
-    setFile(null); setDuration(0); setStage('idle'); setSteps(createProgressSteps(engine)); setTranscript(null); setReport(null); setError('')
+    setFile(null); setDuration(0); setStage('idle'); setSteps(createProgressSteps(engine)); setTranscript(null); setReport(null); setError(''); setCloudConsent(false)
   }
 
   function download() {
@@ -154,7 +169,7 @@ export default function App() {
 
       <section className="workspace">
         <div className="panel upload-panel">
-          <div className="panel-heading"><div><span className="step">01</span><div><h2>ไฟล์การประชุม</h2><p>เลือกไฟล์เสียงภาษาไทย</p></div></div>{file && <button className="icon-button" onClick={reset}><RotateCcw size={17}/></button>}</div>
+          <div className="panel-heading"><div><span className="step">01</span><div><h2>ไฟล์การประชุม</h2><p>เลือกไฟล์เสียงภาษาไทย</p></div></div>{file && <button className="icon-button" disabled={stage === 'processing'} onClick={reset} aria-label="เริ่มใหม่"><RotateCcw size={17}/></button>}</div>
 
           {!file ? <div className={`dropzone ${dragging ? 'dragging' : ''}`}
             onDragOver={e => { e.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)}
@@ -165,7 +180,7 @@ export default function App() {
             <small>MP3, M4A, WAV, OGG · สูงสุด {Math.round(audioLimits.maxBytes / 1024 / 1024)} MB / {Math.round(audioLimits.maxDurationSeconds / 60)} นาที</small>
           </div> : <div className="file-card">
             <div className="audio-icon"><FileAudio size={23}/></div><div className="file-meta"><strong>{file.name}</strong><span>{(file.size / 1024 / 1024).toFixed(1)} MB · {duration ? formatDuration(duration) : 'ไฟล์เสียง'}</span></div>
-            <button onClick={reset}><X size={17}/></button>
+            <button disabled={stage === 'processing'} onClick={reset} aria-label="นำไฟล์ออก"><X size={17}/></button>
             <div className="waveform">{Array.from({length: 34}).map((_,i)=><i key={i} style={{height: `${18 + ((i * 13) % 28)}%`}}/>)}</div>
           </div>}
 
@@ -178,7 +193,7 @@ export default function App() {
                 value={option.id}
                 checked={engine === option.id}
                 disabled={stage === 'processing' || stage === 'done'}
-                onChange={() => { setEngine(option.id); setTranscript(null); setReport(null); setError('') }}
+                onChange={() => { setEngine(option.id); setTranscript(null); setReport(null); setError(''); setCloudConsent(false); setSteps(createProgressSteps(option.id)) }}
               />
               <span className="model-radio"></span>
               <span className="model-copy"><strong>{option.name}</strong><small>{option.detail}</small></span>
@@ -203,11 +218,21 @@ export default function App() {
             </label>)}</div>
           </div>}
 
+          {file && engine === 'cloud' && <label className="cloud-consent">
+            <input
+              type="checkbox"
+              checked={cloudConsent}
+              disabled={stage === 'processing' || stage === 'done'}
+              onChange={(event) => { setCloudConsent(event.target.checked); setError('') }}
+            />
+            <span><strong>ยืนยันการประมวลผลบนคลาวด์</strong><small>ฉันเข้าใจว่าเสียงและบทถอดเสียงจะถูกส่งไปยัง Groq สำหรับงานนี้ · ประมาณ {Math.max(1, Math.ceil(duration / 60))} นาที</small></span>
+          </label>}
+
           {(stage === 'processing' || stage === 'done' || (stage === 'error' && steps.some((step) => step.status === 'error'))) && <ProcessingProgress steps={steps}/>} 
           {error && <div className="error-box">{error}</div>}
-          <button className="primary-button" disabled={!file || stage === 'processing' || stage === 'done'} onClick={processMeeting}><WandSparkles size={18}/>{stage === 'processing' ? 'กำลังประมวลผล…' : transcript && !report ? 'ลองสร้างรายงานอีกครั้ง' : stage === 'done' ? 'สร้างรายงานเรียบร้อย' : 'สร้างรายงานการประชุม'}<ChevronRight size={18}/></button>
+          <button className="primary-button" disabled={!file || stage === 'processing' || stage === 'done' || (engine === 'cloud' && !cloudConsent)} onClick={processMeeting}><WandSparkles size={18}/>{stage === 'processing' ? 'กำลังประมวลผล…' : transcript && !report ? 'ลองสร้างรายงานอีกครั้ง' : stage === 'done' ? 'สร้างรายงานเรียบร้อย' : 'สร้างรายงานการประชุม'}<ChevronRight size={18}/></button>
           <div className="local-note">{cloudMode
-            ? <><Cloud size={15}/><div><strong>ประมวลผลผ่านคลาวด์ (Groq)</strong><span>เสียงจะถูกแปลงเป็นข้อความด้วย Whisper Large V3 และสรุปด้วย Llama 3.3 70B บนคลาวด์</span></div></>
+            ? <><Cloud size={15}/><div><strong>ประมวลผลผ่านคลาวด์ (Groq)</strong><span>เสียงจะถูกแปลงเป็นข้อความด้วย Whisper Large V3 และสรุปด้วย GPT-OSS 120B บนคลาวด์</span></div></>
             : <><LockKeyhole size={15}/><div><strong>ประมวลผลแบบ Local</strong><span>เสียงและเนื้อหาจะไม่ออกจากอุปกรณ์นี้</span></div></>}</div>
         </div>
 
@@ -219,7 +244,7 @@ export default function App() {
       </section>
 
       <div className="engine-note">{cloudMode
-        ? <><span>POWERED BY</span><b>Groq</b><i></i><b>Whisper Large V3</b><i></i><b>Llama 3.3 70B</b></>
+        ? <><span>POWERED BY</span><b>Groq</b><i></i><b>Whisper Large V3</b><i></i><b>GPT-OSS 120B</b></>
         : <><span>POWERED LOCALLY BY</span><b>Gemma 4 E2B</b><i></i><b>LiteRT-LM</b><i></i><b>WebGPU</b></>}</div>
     </main>
     <footer><span>สรุป · Local-first meeting intelligence</span><span>{cloudMode ? 'โหมดคลาวด์ผ่าน Groq · สลับเป็น Offline ได้ทุกเมื่อ' : 'ไม่มีเซิร์ฟเวอร์ · ไม่มีการติดตาม · ไม่มีข้อมูลรั่วไหล'}</span></footer>

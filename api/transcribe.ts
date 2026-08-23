@@ -6,10 +6,13 @@ const GROQ_TRANSCRIBE_URL = 'https://api.groq.com/openai/v1/audio/transcriptions
 const GROQ_ASR_MODEL = 'whisper-large-v3'
 const MAX_UPLOAD_BYTES = 4_400_000
 
-function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>) {
+class RequestTooLargeError extends Error {}
+
+function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>, headers: Record<string, string> = {}) {
   res.statusCode = status
   res.setHeader('content-type', 'application/json; charset=utf-8')
   res.setHeader('cache-control', 'no-store')
+  for (const [name, value] of Object.entries(headers)) res.setHeader(name, value)
   res.end(JSON.stringify(body))
 }
 
@@ -17,22 +20,29 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let received = 0
+    let tooLarge = false
     req.on('data', (chunk: Buffer) => {
       received += chunk.length
       if (received > MAX_UPLOAD_BYTES) {
-        reject(new Error('payload-too-large'))
-        req.destroy()
+        tooLarge = true
         return
       }
       chunks.push(chunk)
     })
-    req.on('end', () => resolve(Buffer.concat(chunks)))
+    req.on('end', () => {
+      if (tooLarge) {
+        reject(new RequestTooLargeError('request body too large'))
+        return
+      }
+      resolve(Buffer.concat(chunks))
+    })
     req.on('error', reject)
   })
 }
 
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== 'POST') { sendJson(res, 405, { error: 'ต้องใช้เมธอด POST เท่านั้น' }); return }
+  if (process.env.ENABLE_CLOUD_MODE !== 'true') { sendJson(res, 404, { error: 'ไม่ได้เปิดใช้งานโหมดคลาวด์' }); return }
 
   const apiKey = process.env.GROQ_API_KEY
   if (!apiKey) { sendJson(res, 500, { error: 'เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า GROQ_API_KEY' }); return }
@@ -41,7 +51,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   try {
     audio = await readBody(req)
   } catch (error) {
-    if (error instanceof Error && error.message === 'payload-too-large') {
+    if (error instanceof RequestTooLargeError) {
       sendJson(res, 413, { error: 'ไฟล์เสียงช่วงนี้ใหญ่เกินที่เซิร์ฟเวอร์รับได้' })
       return
     }
@@ -77,7 +87,16 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       detail = typeof data.error?.message === 'string' ? data.error.message : ''
     } catch { /* keep empty detail */ }
     if (groqResponse.status === 429) {
-      sendJson(res, 429, { error: 'บริการถอดเสียงฟรีถึงขีดจำกัดชั่วคราว กรุณารอสักครู่แล้วลองอีกครั้ง' })
+      const retryAfter = groqResponse.headers.get('retry-after')
+      sendJson(res, 429, { error: 'บริการถอดเสียงฟรีถึงขีดจำกัดชั่วคราว กรุณารอสักครู่แล้วลองอีกครั้ง' }, retryAfter ? { 'retry-after': retryAfter } : {})
+      return
+    }
+    if (groqResponse.status === 401) {
+      sendJson(res, 502, { error: 'Groq ไม่ยอมรับ API key กรุณาตรวจสอบ GROQ_API_KEY ใน Vercel' })
+      return
+    }
+    if (groqResponse.status === 403) {
+      sendJson(res, 502, { error: 'Groq ปฏิเสธการเชื่อมต่อ กรุณาตรวจสอบสิทธิ์บัญชีและการตั้งค่าเครือข่าย' })
       return
     }
     sendJson(res, 502, { error: `บริการถอดเสียงผิดพลาด (${groqResponse.status})${detail ? `: ${detail}` : ''}` })

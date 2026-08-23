@@ -42,9 +42,9 @@ const STEP_WEIGHTS: Record<ProgressStepId, number> = {
 }
 
 export function createProgressSteps(mode: EngineMode = 'local', completedThrough?: ProgressStepId): ProgressStep[] {
-  const completedIndex = completedThrough ? STEP_DEFINITIONS.findIndex(({ id }) => id === completedThrough) : -1
-  return STEP_DEFINITIONS
-    .filter(({ id }) => mode === 'local' || !CLOUD_ONLY_STEPS.has(id))
+  const visibleSteps = STEP_DEFINITIONS.filter(({ id }) => mode === 'local' || !CLOUD_ONLY_STEPS.has(id))
+  const completedIndex = completedThrough ? visibleSteps.findIndex(({ id }) => id === completedThrough) : -1
+  return visibleSteps
     .map(({ id, label }, index) => ({
       id,
       label: mode === 'cloud' && id === 'transcription' ? 'ถอดเสียงผ่านคลาวด์ (Groq)' : label,

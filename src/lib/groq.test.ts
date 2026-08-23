@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { chunkSamples, createNdjsonParser, encodeWav, floatToInt16, CHUNK_SECONDS, SAMPLE_RATE } from './groq'
+import { chunkSamples, createNdjsonParser, encodeWav, floatToInt16, retryDelayMs, CHUNK_SECONDS, SAMPLE_RATE } from './groq'
 
 describe('pcm conversion', () => {
   it('clamps and quantizes float samples to 16-bit', () => {
@@ -31,6 +31,14 @@ describe('sample chunking', () => {
     const chunks = chunkSamples(long)
     expect(chunks).toHaveLength(3)
     for (const chunk of chunks.slice(0, -1)) expect(chunk.length).toBe(CHUNK_SECONDS * SAMPLE_RATE)
+  })
+})
+
+describe('free-tier retry timing', () => {
+  it('uses Retry-After seconds and caps excessive waits', () => {
+    expect(retryDelayMs('2')).toBe(2_000)
+    expect(retryDelayMs('999')).toBe(20_000)
+    expect(retryDelayMs(null)).toBe(5_000)
   })
 })
 

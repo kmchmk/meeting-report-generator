@@ -78,6 +78,19 @@ async function readErrorMessage(response: Response) {
   return null
 }
 
+export function retryDelayMs(value: string | null, fallbackMs = 5_000) {
+  if (!value) return fallbackMs
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(20_000, Math.ceil(seconds * 1_000))
+  const timestamp = Date.parse(value)
+  if (Number.isFinite(timestamp)) return Math.min(20_000, Math.max(0, timestamp - Date.now()))
+  return fallbackMs
+}
+
+function delay(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
 function requestFailure(error: unknown): Error {
   if (error instanceof TypeError) {
     return new Error('ไม่พบ API ของเซิร์ฟเวอร์ โหมดคลาวด์ต้องรันผ่าน `vercel dev` หรือ deploy บน Vercel')
@@ -101,11 +114,24 @@ export async function transcribeRemote(
         status: 'active',
         detail: chunks.length > 1 ? `กำลังส่งช่วงเสียง ${index + 1} จาก ${chunks.length} ไปถอดเสียง…` : 'กำลังส่งเสียงไปถอดข้อความ…',
       })
-      const response = await fetch('/api/transcribe', {
-        method: 'POST',
-        headers: { 'content-type': 'audio/wav' },
-        body: encodeWav(chunks[index]),
-      })
+      let response: Response | null = null
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        response = await fetch('/api/transcribe', {
+          method: 'POST',
+          headers: { 'content-type': 'audio/wav' },
+          body: encodeWav(chunks[index]),
+        })
+        if (response.status !== 429 || attempt === 2) break
+        const waitMs = retryDelayMs(response.headers.get('retry-after'))
+        onProgress({
+          step: 'transcription',
+          progress: Math.round(base),
+          status: 'active',
+          detail: `ถึงขีดจำกัดฟรีชั่วคราว · รอ ${Math.max(1, Math.ceil(waitMs / 1_000))} วินาทีแล้วลองใหม่…`,
+        })
+        await delay(waitMs)
+      }
+      if (!response) throw new Error('ไม่ได้รับคำตอบจากบริการถอดเสียง')
       if (!response.ok) throw new Error(await readErrorMessage(response) ?? `ถอดเสียงผ่านคลาวด์ไม่สำเร็จ (${response.status})`)
       const data = await response.json() as { text?: unknown }
       if (typeof data.text !== 'string') throw new Error('คำตอบการถอดเสียงจากเซิร์ฟเวอร์ไม่ถูกต้อง')

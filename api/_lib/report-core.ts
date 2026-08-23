@@ -8,8 +8,8 @@ export type MeetingReport = {
   risks: string[]
 }
 
-export const MAX_SOURCE_CHARS = 4_500
-export const MAX_FINAL_SOURCE_CHARS = 5_000
+export const MAX_SOURCE_CHARS = 3_500
+export const MAX_FINAL_SOURCE_CHARS = 3_800
 export const MAX_REDUCTION_PASSES = 6
 
 export const SECRETARY_SYSTEM_PROMPT = 'คุณเป็นเลขานุการการประชุมมืออาชีพ วิเคราะห์เฉพาะข้อมูลที่ได้รับ ห้ามแต่งข้อมูลเพิ่ม'
@@ -89,7 +89,7 @@ export async function reduceTranscriptSequentially(source: string, summarize: Su
 }
 
 export function buildSummarizePrompt(part: string, index: number, total: number, pass: number) {
-  return `ย่อข้อมูลการประชุมรอบที่ ${pass} ส่วนที่ ${index + 1} จาก ${total} ให้กระชับไม่เกิน 350 คำ เก็บชื่อบุคคล ตัวเลข มติ งาน ผู้รับผิดชอบ กำหนดเวลา และความเสี่ยงทั้งหมด ห้ามเพิ่มข้อมูล:\n${part}`
+  return `ย่อข้อมูลการประชุมรอบที่ ${pass} ส่วนที่ ${index + 1} จาก ${total} ให้กระชับไม่เกิน 250 คำ เก็บชื่อบุคคล ตัวเลข มติ งาน ผู้รับผิดชอบ กำหนดเวลา และความเสี่ยงทั้งหมด ห้ามเพิ่มข้อมูล:\n${part}`
 }
 
 export function buildFinalReportPrompt(source: string) {

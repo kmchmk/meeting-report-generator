@@ -27,6 +27,15 @@ describe('processing progress', () => {
     expect(calculateOverallProgress(steps)).toBeCloseTo(100 * (30 * 0.5) / 45, 5)
   })
 
+  it('only marks visible cloud steps through the requested step as complete', () => {
+    const steps = createProgressSteps('cloud', 'transcription')
+    expect(steps.map(({ id, status }) => [id, status])).toEqual([
+      ['audio', 'done'],
+      ['transcription', 'done'],
+      ['report', 'pending'],
+    ])
+  })
+
   it('formats model download sizes', () => {
     expect(formatBytes(2_621_440)).toBe('2.5 MB')
     expect(formatBytes(2_147_483_648)).toBe('2.00 GB')

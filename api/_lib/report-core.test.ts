@@ -36,8 +36,8 @@ describe('hierarchical transcript reduction', () => {
       return part.slice(0, 700)
     })
     expect(peak).toBe(1)
-    expect(calls).toEqual([0, 1, 2])
-    expect(reduced.length).toBeLessThanOrEqual(5_000)
+    expect(calls).toEqual([0, 1, 2, 3])
+    expect(reduced.length).toBeLessThanOrEqual(3_800)
   })
 
   it('fails safely when a model does not compress the source', async () => {
