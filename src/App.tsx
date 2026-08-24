@@ -11,14 +11,26 @@ type Stage = 'idle' | 'ready' | 'processing' | 'done' | 'error'
 
 const CLOUD_MODE_ENABLED = import.meta.env.VITE_ENABLE_CLOUD_MODE === 'true'
 const DEFAULT_ENGINE: EngineMode = CLOUD_MODE_ENABLED ? 'cloud' : 'local'
-const ENGINE_OPTIONS: Array<{ id: EngineMode; name: string; detail: string; badge: string }> = [
-  ...(CLOUD_MODE_ENABLED ? [{ id: 'cloud' as const, name: 'Groq · Whisper Large V3', detail: 'แม่นยำและรวดเร็ว · ใช้โควตาฟรี · ส่งเสียงและบทถอดเสียงไปยัง Groq', badge: 'แนะนำ' }] : []),
-  { id: 'local', name: 'ประมวลผลในเครื่อง (Offline)', detail: 'ข้อมูลไม่ออกจากอุปกรณ์ · ดาวน์โหลดโมเดลครั้งแรกประมาณ 650 MB–2.0 GB', badge: 'ความเป็นส่วนตัวสูงสุด' },
+const ENGINE_OPTIONS: Array<{ id: EngineMode; name: string; detail: string; technical: string; badge: string }> = [
+  ...(CLOUD_MODE_ENABLED ? [{
+    id: 'cloud' as const,
+    name: 'ใช้งานออนไลน์ — ง่ายและรวดเร็ว',
+    detail: 'ระบบจะช่วยถอดเสียงและทำรายงานให้ เหมาะสำหรับการใช้งานทั่วไป ไม่ต้องดาวน์โหลดไฟล์ขนาดใหญ่',
+    technical: 'Groq Cloud · Whisper Large V3 · GPT-OSS 120B',
+    badge: 'แนะนำ',
+  }] : []),
+  {
+    id: 'local',
+    name: 'ใช้งานแบบส่วนตัว — อยู่ในเครื่องนี้',
+    detail: 'ไฟล์ประชุมจะไม่ถูกส่งออกจากอุปกรณ์ เหมาะกับเรื่องลับ แต่การใช้งานครั้งแรกอาจต้องรอดาวน์โหลด',
+    technical: 'Offline in browser · Whisper · Gemma',
+    badge: 'ส่วนตัวที่สุด',
+  },
 ]
 
-const ASR_MODELS: Array<{ id: AsrModelId; name: string; detail: string; badge?: string }> = [
-  { id: 'small', name: 'Whisper Small', detail: 'เร็วกว่า · ดาวน์โหลดประมาณ 650 MB', badge: 'แนะนำสำหรับทั่วไป' },
-  { id: 'large-v3-turbo', name: 'Whisper Large V3 Turbo', detail: 'แม่นยำกว่า · ดาวน์โหลดประมาณ 2.0 GB', badge: 'ความแม่นยำสูง' },
+const ASR_MODELS: Array<{ id: AsrModelId; name: string; detail: string; technical: string; badge?: string }> = [
+  { id: 'small', name: 'แบบรวดเร็ว', detail: 'ใช้เวลารอน้อยกว่า เหมาะกับเสียงประชุมที่ชัดเจน', technical: 'Whisper Small · ดาวน์โหลดประมาณ 650 MB', badge: 'แนะนำ' },
+  { id: 'large-v3-turbo', name: 'แบบแม่นยำขึ้น', detail: 'เหมาะกับเสียงเบา เสียงรบกวน หรือผู้พูดหลายคน แต่อาจใช้เวลานานกว่า', technical: 'Whisper Large V3 Turbo · ดาวน์โหลดประมาณ 2.0 GB' },
 ]
 
 const demoReport: MeetingReport = {
@@ -153,17 +165,17 @@ export default function App() {
   return <div className="app-shell">
     <header>
       <a className="brand" href="#"><span className="brand-mark"><Sparkles size={17}/></span><span>สรุป</span><small>{cloudMode ? 'HYBRID' : 'LOCAL'}</small></a>
-      <div className="privacy-pill"><span></span>{cloudMode ? <><Cloud size={14}/> ถอดเสียงและสรุปผ่านคลาวด์ Groq</> : <><LockKeyhole size={14}/> ข้อมูลอยู่ในเครื่องคุณเท่านั้น</>}</div>
+      <div className="privacy-pill"><span></span>{cloudMode ? <><Cloud size={14}/> ออนไลน์: ง่ายและรวดเร็ว</> : <><LockKeyhole size={14}/> ส่วนตัว: ข้อมูลอยู่ในเครื่อง</>}</div>
       <button className="about">ทำงานอย่างไร <ChevronRight size={15}/></button>
     </header>
 
     <main>
       <section className="hero">
-        <div className="eyebrow"><ShieldCheck size={15}/> PRIVATE MEETING INTELLIGENCE</div>
+        <div className="eyebrow"><ShieldCheck size={15}/> ผู้ช่วยสรุปการประชุมภาษาไทย</div>
         <h1>เปลี่ยนเสียงประชุม<br/>เป็น<span>ความชัดเจน</span></h1>
-        <p>ถอดเสียงภาษาไทยและสร้างรายงานอย่างละเอียด<br/>{cloudMode ? 'เริ่มทันทีไม่ต้องดาวน์โหลดโมเดล' : 'ประมวลผลบนอุปกรณ์ของคุณ 100%'}</p>
+        <p>เลือกไฟล์เสียง แล้วระบบจะถอดคำพูดและจัดทำรายงานให้อ่านง่าย<br/>{cloudMode ? 'โหมดออนไลน์ใช้งานง่าย รวดเร็ว และเหมาะสำหรับการใช้งานทั่วไป' : 'โหมดส่วนตัวเก็บทุกอย่างไว้ในอุปกรณ์ของคุณ'}</p>
         <div className="trust-row">{cloudMode
-          ? <><span><Check/>ใช้งานฟรี</span><span><Check/>ไม่ต้องดาวน์โหลดโมเดล</span><span><Check/>สลับกลับโหมด Offline ได้</span></>
+          ? <><span><Check/>ใช้งานฟรี</span><span><Check/>เริ่มได้ทันที</span><span><Check/>เปลี่ยนเป็นโหมดส่วนตัวได้</span></>
           : <><span><Check/>ไม่อัปโหลดไฟล์</span><span><Check/>ไม่ต้องสมัครสมาชิก</span><span><Check/>ใช้งานได้ฟรี</span></>}</div>
       </section>
 
@@ -176,7 +188,7 @@ export default function App() {
             onDrop={e => { e.preventDefault(); setDragging(false); void chooseFile(e.dataTransfer.files[0]) }} onClick={() => inputRef.current?.click()}>
             <input ref={inputRef} type="file" accept="audio/*,.m4a" hidden onChange={e => void chooseFile(e.target.files?.[0])}/>
             <div className="upload-icon"><Upload size={27}/><span className="pulse-ring"></span></div>
-            <h3>วางไฟล์เสียงที่นี่</h3><p>หรือลอง<span> เลือกจากเครื่อง</span></p>
+            <h3>เลือกไฟล์เสียงการประชุม</h3><p>แตะที่นี่เพื่อ<span> เลือกไฟล์จากเครื่อง</span> หรือวางไฟล์ในช่องนี้</p>
             <small>MP3, M4A, WAV, OGG · สูงสุด {Math.round(audioLimits.maxBytes / 1024 / 1024)} MB / {Math.round(audioLimits.maxDurationSeconds / 60)} นาที</small>
           </div> : <div className="file-card">
             <div className="audio-icon"><FileAudio size={23}/></div><div className="file-meta"><strong>{file.name}</strong><span>{(file.size / 1024 / 1024).toFixed(1)} MB · {duration ? formatDuration(duration) : 'ไฟล์เสียง'}</span></div>
@@ -185,7 +197,7 @@ export default function App() {
           </div>}
 
           {file && <div className="model-selector" role="radiogroup" aria-label="เลือกวิธีประมวลผล">
-            <div className="model-selector-heading"><strong>วิธีการประมวลผล</strong><span>เลือกได้ก่อนเริ่มทุกครั้ง</span></div>
+            <div className="model-selector-heading"><strong>เลือกวิธีใช้งาน</strong><span>หากไม่แน่ใจ ให้เลือกตัวที่แนะนำ</span></div>
             <div className="model-options">{ENGINE_OPTIONS.map((option) => <label className={engine === option.id ? 'selected' : ''} key={option.id}>
               <input
                 type="radio"
@@ -196,13 +208,13 @@ export default function App() {
                 onChange={() => { setEngine(option.id); setTranscript(null); setReport(null); setError(''); setCloudConsent(false); setSteps(createProgressSteps(option.id)) }}
               />
               <span className="model-radio"></span>
-              <span className="model-copy"><strong>{option.name}</strong><small>{option.detail}</small></span>
+              <span className="model-copy"><strong>{option.name}</strong><span className="option-explanation">{option.detail}</span><small>{option.technical}</small></span>
               <em>{option.badge}</em>
             </label>)}</div>
           </div>}
 
           {file && engine === 'local' && <div className="model-selector" role="radiogroup" aria-label="เลือกโมเดลถอดเสียง">
-            <div className="model-selector-heading"><strong>โมเดลถอดเสียง</strong><span>ทั้งสองโมเดลทำงานในเครื่อง</span></div>
+            <div className="model-selector-heading"><strong>เลือกระดับการถอดเสียง</strong><span>ทั้งสองแบบเก็บข้อมูลไว้ในเครื่อง</span></div>
             <div className="model-options">{ASR_MODELS.map((model) => <label className={asrModel === model.id ? 'selected' : ''} key={model.id}>
               <input
                 type="radio"
@@ -213,7 +225,7 @@ export default function App() {
                 onChange={() => { setAsrModel(model.id); setTranscript(null); setReport(null) }}
               />
               <span className="model-radio"></span>
-              <span className="model-copy"><strong>{model.name}</strong><small>{model.detail}</small></span>
+              <span className="model-copy"><strong>{model.name}</strong><span className="option-explanation">{model.detail}</span><small>{model.technical}</small></span>
               {model.badge && <em>{model.badge}</em>}
             </label>)}</div>
           </div>}
@@ -225,15 +237,15 @@ export default function App() {
               disabled={stage === 'processing' || stage === 'done'}
               onChange={(event) => { setCloudConsent(event.target.checked); setError('') }}
             />
-            <span><strong>ยืนยันการประมวลผลบนคลาวด์</strong><small>ฉันเข้าใจว่าเสียงและบทถอดเสียงจะถูกส่งไปยัง Groq สำหรับงานนี้ · ประมาณ {Math.max(1, Math.ceil(duration / 60))} นาที</small></span>
+            <span><strong>ฉันยอมรับให้ส่งไฟล์เสียงไปประมวลผลออนไลน์</strong><span className="consent-explanation">ไฟล์เสียงและข้อความจะออกจากอุปกรณ์สำหรับงานนี้</span><small>ผู้ให้บริการ: Groq · ระยะเวลาเสียงประมาณ {Math.max(1, Math.ceil(duration / 60))} นาที</small></span>
           </label>}
 
           {(stage === 'processing' || stage === 'done' || (stage === 'error' && steps.some((step) => step.status === 'error'))) && <ProcessingProgress steps={steps}/>} 
           {error && <div className="error-box">{error}</div>}
           <button className="primary-button" disabled={!file || stage === 'processing' || stage === 'done' || (engine === 'cloud' && !cloudConsent)} onClick={processMeeting}><WandSparkles size={18}/>{stage === 'processing' ? 'กำลังประมวลผล…' : transcript && !report ? 'ลองสร้างรายงานอีกครั้ง' : stage === 'done' ? 'สร้างรายงานเรียบร้อย' : 'สร้างรายงานการประชุม'}<ChevronRight size={18}/></button>
           <div className="local-note">{cloudMode
-            ? <><Cloud size={15}/><div><strong>ประมวลผลผ่านคลาวด์ (Groq)</strong><span>เสียงจะถูกแปลงเป็นข้อความด้วย Whisper Large V3 และสรุปด้วย GPT-OSS 120B บนคลาวด์</span></div></>
-            : <><LockKeyhole size={15}/><div><strong>ประมวลผลแบบ Local</strong><span>เสียงและเนื้อหาจะไม่ออกจากอุปกรณ์นี้</span></div></>}</div>
+            ? <><Cloud size={18}/><div><strong>โหมดออนไลน์คืออะไร?</strong><span>ระบบส่งไฟล์ไปช่วยประมวลผล แล้วส่งบทถอดเสียงและรายงานกลับมาให้คุณ</span><small>Groq Cloud · Whisper Large V3 · GPT-OSS 120B</small></div></>
+            : <><LockKeyhole size={18}/><div><strong>โหมดส่วนตัวคืออะไร?</strong><span>ระบบทำงานในเบราว์เซอร์นี้ ไฟล์เสียงและเนื้อหาไม่ถูกส่งออกไปที่อื่น</span><small>Offline · Whisper · Gemma · WebGPU</small></div></>}</div>
         </div>
 
         <div className="panel report-panel">
