@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowDownToLine, Check, CheckCircle2, ChevronRight, Clock3, Cloud, FileAudio, FileText, LockKeyhole, RotateCcw, ShieldCheck, Sparkles, Upload, Users, WandSparkles, X } from 'lucide-react'
+import { ArrowDownToLine, Check, CheckCircle2, ChevronRight, Clock3, Cloud, FileAudio, FileDown, FileText, History as HistoryIcon, LockKeyhole, Play, Printer, RotateCcw, ShieldCheck, Sparkles, Trash2, Upload, Users, WandSparkles, X } from 'lucide-react'
 import { decodeAudio, formatDuration, getAudioLimits, readAudioDuration, validateAudioDuration, validateAudioSelection } from './lib/audio'
 import { generateReport } from './lib/gemma'
 import { generateReportRemote, transcribeRemote } from './lib/groq'
+import { deleteDraft, deleteHistory, fileDraftId, listHistory, loadDraft, saveDraft, saveHistory } from './lib/history'
+import { downloadMarkdown, downloadWord } from './lib/export'
+import { transcriptText } from './lib/transcript'
 import type { MeetingReport } from '../api/_lib/report-core'
 import { calculateOverallProgress, createProgressSteps, formatBytes, type EngineMode, type ProgressEvent, type ProgressStep } from './progress'
-import type { AsrModelId, TranscriptResult } from './types'
+import type { AsrModelId, CloudReportProvider, CloudTranscriptionProvider, MeetingHistoryItem, TranscriptResult } from './types'
 
 type Stage = 'idle' | 'ready' | 'processing' | 'done' | 'error'
 
@@ -16,7 +19,7 @@ const ENGINE_OPTIONS: Array<{ id: EngineMode; name: string; detail: string; tech
     id: 'cloud' as const,
     name: 'ใช้งานออนไลน์ — ง่ายและรวดเร็ว',
     detail: 'ระบบจะช่วยถอดเสียงและทำรายงานให้ เหมาะสำหรับการใช้งานทั่วไป ไม่ต้องดาวน์โหลดไฟล์ขนาดใหญ่',
-    technical: 'Groq Cloud · Whisper Large V3 · GPT-OSS 120B',
+    technical: 'Cloud speech-to-text · Groq/Gemini report fallback',
     badge: 'แนะนำ',
   }] : []),
   {
@@ -32,6 +35,11 @@ const ASR_MODELS: Array<{ id: AsrModelId; name: string; detail: string; technica
   { id: 'small', name: 'แบบรวดเร็ว', detail: 'ใช้เวลารอน้อยกว่า เหมาะกับเสียงประชุมที่ชัดเจน', technical: 'Whisper Small · ดาวน์โหลดประมาณ 650 MB', badge: 'แนะนำ' },
   { id: 'large-v3-turbo', name: 'แบบแม่นยำขึ้น', detail: 'เหมาะกับเสียงเบา เสียงรบกวน หรือผู้พูดหลายคน แต่อาจใช้เวลานานกว่า', technical: 'Whisper Large V3 Turbo · ดาวน์โหลดประมาณ 2.0 GB' },
 ]
+
+const PROVIDER_LABELS: Record<string, string> = {
+  auto: 'เลือกบริการที่พร้อมให้อัตโนมัติ', groq: 'Groq', deepgram: 'Deepgram', assemblyai: 'AssemblyAI',
+  cloudflare: 'Cloudflare Workers AI', azure: 'Microsoft Azure Speech', google: 'Google Speech-to-Text', gemini: 'Google Gemini',
+}
 
 const demoReport: MeetingReport = {
   title: 'ประชุมวางแผนเปิดตัวผลิตภัณฑ์ Q4', date: '21 สิงหาคม 2569',
@@ -61,12 +69,38 @@ export default function App() {
   const [asrModel, setAsrModel] = useState<AsrModelId>('small')
   const [engine, setEngine] = useState<EngineMode>(DEFAULT_ENGINE)
   const [cloudConsent, setCloudConsent] = useState(false)
+  const [glossary, setGlossary] = useState('')
+  const [speakerLabels, setSpeakerLabels] = useState(false)
+  const [transcriptionProvider, setTranscriptionProvider] = useState<CloudTranscriptionProvider>('auto')
+  const [reportProvider, setReportProvider] = useState<CloudReportProvider>('auto')
+  const [availableTranscriptionProviders, setAvailableTranscriptionProviders] = useState<string[]>(['groq'])
+  const [availableReportProviders, setAvailableReportProviders] = useState<string[]>(['groq'])
+  const [history, setHistory] = useState<MeetingHistoryItem[]>([])
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [audioUrl, setAudioUrl] = useState('')
   const workerRef = useRef<Worker | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const audioRef = useRef<HTMLAudioElement>(null)
   const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory
   const audioLimits = getAudioLimits(deviceMemory)
 
-  useEffect(() => () => workerRef.current?.terminate(), [])
+  useEffect(() => {
+    void listHistory().then(setHistory).catch(() => undefined)
+    if (CLOUD_MODE_ENABLED) {
+      void fetch('/api/config').then(async (response) => response.ok ? response.json() : null).then((config: { transcriptionProviders?: string[]; reportProviders?: string[] } | null) => {
+        if (config?.transcriptionProviders?.length) setAvailableTranscriptionProviders(config.transcriptionProviders)
+        if (config?.reportProviders?.length) setAvailableReportProviders(config.reportProviders)
+      }).catch(() => undefined)
+    }
+    return () => workerRef.current?.terminate()
+  }, [])
+
+  useEffect(() => {
+    if (!file) { setAudioUrl(''); return }
+    const url = URL.createObjectURL(file)
+    setAudioUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [file])
 
   function updateProgress(event: ProgressEvent) {
     setSteps((current) => current.map((step) => step.id === event.step ? {
@@ -97,7 +131,7 @@ export default function App() {
   async function processMeeting() {
     if (!file) return
     if (engine === 'cloud' && !cloudConsent) {
-      setError('กรุณายืนยันก่อนว่าสามารถส่งเสียงและบทถอดเสียงไปประมวลผลที่ Groq ได้')
+      setError('กรุณายืนยันก่อนว่าสามารถส่งเสียงและบทถอดเสียงไปประมวลผลออนไลน์ได้')
       setStage('error'); return
     }
     if (engine === 'local' && !('gpu' in navigator)) {
@@ -114,7 +148,16 @@ export default function App() {
         const { samples } = await decodeAudio(file)
         updateProgress({ step: 'audio', progress: 100, status: 'done', detail: 'เตรียมไฟล์เสียงเรียบร้อย' })
         if (engine === 'cloud') {
-          result = await transcribeRemote(samples, updateProgress)
+          const draftId = fileDraftId(file, `${transcriptionProvider}:${speakerLabels}`)
+          const draft = await loadDraft(draftId).catch(() => undefined)
+          result = await transcribeRemote(samples, updateProgress, {
+            provider: transcriptionProvider,
+            glossary,
+            diarization: speakerLabels,
+            resumeChunks: draft?.completed,
+            onPartial: (index, chunks) => { void saveDraft(draftId, index, chunks).catch(() => undefined) },
+          })
+          await deleteDraft(draftId).catch(() => undefined)
         } else {
           const worker = new Worker(new URL('./workers/asr.worker.ts', import.meta.url), { type: 'module' })
           workerRef.current = worker
@@ -136,9 +179,14 @@ export default function App() {
         setTranscript(result)
       }
       const generated = engine === 'cloud'
-        ? await generateReportRemote(result.text, updateProgress)
+        ? await generateReportRemote(result.text, updateProgress, { provider: reportProvider, glossary })
         : await generateReport(result.text, updateProgress)
-      setReport(generated); setStage('done')
+      setReport(generated); setStage('done'); setTab('report')
+      const item: MeetingHistoryItem = {
+        id: crypto.randomUUID(), createdAt: new Date().toISOString(), fileName: file.name, duration, engine,
+        transcript: result, report: generated,
+      }
+      await saveHistory(item).then(() => setHistory((current) => [item, ...current].slice(0, 30))).catch(() => undefined)
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : 'เกิดข้อผิดพลาดในการประมวลผล'
       setError(message)
@@ -152,28 +200,48 @@ export default function App() {
     setFile(null); setDuration(0); setStage('idle'); setSteps(createProgressSteps(engine)); setTranscript(null); setReport(null); setError(''); setCloudConsent(false)
   }
 
-  function download() {
-    if (!report) return
-    const lines = [`# ${report.title}`, '', `วันที่: ${report.date}`, '', '## สรุปภาพรวม', report.overview, '', '## ประเด็นสำคัญ', ...report.topics.map(x => `### ${x.title}\n${x.detail}`), '', '## มติที่ประชุม', ...report.decisions.map(x => `- ${x}`), '', '## งานที่ต้องดำเนินการ', ...report.actions.map(x => `- ${x.task} — ${x.owner} (${x.due})`), '', '## ประเด็นติดตาม', ...report.risks.map(x => `- ${x}`)]
-    const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' }))
-    const a = document.createElement('a'); a.href = url; a.download = 'meeting-report.md'; a.click(); URL.revokeObjectURL(url)
+  function seekAudio(seconds: number) {
+    if (!audioRef.current) return
+    audioRef.current.currentTime = seconds
+    void audioRef.current.play()
   }
 
-  const activeReport = report ?? (stage === 'idle' ? demoReport : null)
+  function updateTranscript(next: TranscriptResult) {
+    setTranscript(next)
+    setReport(null)
+    setStage('ready')
+    setError('แก้ไขบทถอดเสียงแล้ว กด “สร้างรายงานการประชุม” เพื่อสร้างรายงานใหม่')
+  }
+
+  function openHistoryItem(item: MeetingHistoryItem) {
+    setTranscript(item.transcript); setReport(item.report); setDuration(item.duration); setStage('done'); setEngine(item.engine); setHistoryOpen(false); setTab('report'); setFile(null); setError('')
+  }
+
+  const activeReport = report ?? (stage === 'idle' || stage === 'ready' ? demoReport : null)
   const cloudMode = engine === 'cloud'
 
   return <div className="app-shell">
     <header>
       <a className="brand" href="#"><span className="brand-mark"><Sparkles size={17}/></span><span>สรุป</span><small>{cloudMode ? 'HYBRID' : 'LOCAL'}</small></a>
       <div className="privacy-pill"><span></span>{cloudMode ? <><Cloud size={14}/> ออนไลน์: ง่ายและรวดเร็ว</> : <><LockKeyhole size={14}/> ส่วนตัว: ข้อมูลอยู่ในเครื่อง</>}</div>
-      <button className="about">ทำงานอย่างไร <ChevronRight size={15}/></button>
+      <button className="about history-button" onClick={() => setHistoryOpen(true)}><HistoryIcon size={15}/> ประวัติในเครื่อง</button>
     </header>
+
+    {historyOpen && <div className="history-overlay" role="dialog" aria-modal="true" aria-label="ประวัติรายงาน">
+      <div className="history-dialog">
+        <div className="history-heading"><div><h2>รายงานที่เก็บไว้ในเครื่อง</h2><p>ข้อมูลนี้อยู่ในเบราว์เซอร์นี้เท่านั้น</p></div><button onClick={() => setHistoryOpen(false)} aria-label="ปิด"><X/></button></div>
+        {history.length ? <div className="history-list">{history.map((item) => <div key={item.id}>
+          <button className="history-open" onClick={() => openHistoryItem(item)}><strong>{item.report.title || item.fileName}</strong><span>{new Date(item.createdAt).toLocaleString('th-TH')} · {formatDuration(item.duration)}</span></button>
+          <button className="history-delete" aria-label={`ลบ ${item.report.title}`} onClick={() => { void deleteHistory(item.id).then(() => setHistory((current) => current.filter((value) => value.id !== item.id))) }}><Trash2 size={17}/></button>
+        </div>)}</div> : <div className="history-empty">ยังไม่มีรายงานที่บันทึกไว้</div>}
+      </div>
+    </div>}
 
     <main>
       <section className="hero">
         <div className="eyebrow"><ShieldCheck size={15}/> ผู้ช่วยสรุปการประชุมภาษาไทย</div>
         <h1>เปลี่ยนเสียงประชุม<br/>เป็น<span>ความชัดเจน</span></h1>
-        <p>เลือกไฟล์เสียง แล้วระบบจะถอดคำพูดและจัดทำรายงานให้อ่านง่าย<br/>{cloudMode ? 'โหมดออนไลน์ใช้งานง่าย รวดเร็ว และเหมาะสำหรับการใช้งานทั่วไป' : 'โหมดส่วนตัวเก็บทุกอย่างไว้ในอุปกรณ์ของคุณ'}</p>
+        <p>เลือกไฟล์เสียง แล้วระบบจะถอดคำพูดและจัดทำรายงานให้อ่านง่าย{' '}<br/>{cloudMode ? 'โหมดออนไลน์ใช้งานง่าย รวดเร็ว และเหมาะสำหรับการใช้งานทั่วไป' : 'โหมดส่วนตัวเก็บทุกอย่างไว้ในอุปกรณ์ของคุณ'}</p>
         <div className="trust-row">{cloudMode
           ? <><span><Check/>ใช้งานฟรี</span><span><Check/>เริ่มได้ทันที</span><span><Check/>เปลี่ยนเป็นโหมดส่วนตัวได้</span></>
           : <><span><Check/>ไม่อัปโหลดไฟล์</span><span><Check/>ไม่ต้องสมัครสมาชิก</span><span><Check/>ใช้งานได้ฟรี</span></>}</div>
@@ -194,6 +262,12 @@ export default function App() {
             <div className="audio-icon"><FileAudio size={23}/></div><div className="file-meta"><strong>{file.name}</strong><span>{(file.size / 1024 / 1024).toFixed(1)} MB · {duration ? formatDuration(duration) : 'ไฟล์เสียง'}</span></div>
             <button disabled={stage === 'processing'} onClick={reset} aria-label="นำไฟล์ออก"><X size={17}/></button>
             <div className="waveform">{Array.from({length: 34}).map((_,i)=><i key={i} style={{height: `${18 + ((i * 13) % 28)}%`}}/>)}</div>
+            {audioUrl && <audio ref={audioRef} className="audio-player" controls preload="metadata" src={audioUrl}/>} 
+          </div>}
+
+          {file && <div className="meeting-hints">
+            <label htmlFor="glossary"><strong>ชื่อคนและคำเฉพาะ <span>(ถ้ามี)</span></strong><small>ช่วยให้ระบบสะกดชื่อบริษัท โครงการ หรือคำศัพท์เฉพาะได้ถูกต้องขึ้น</small></label>
+            <textarea id="glossary" value={glossary} disabled={stage === 'processing' || stage === 'done'} onChange={(event) => setGlossary(event.target.value)} maxLength={1000} placeholder="เช่น คุณศิริพร, โครงการสรุป, Intec"/>
           </div>}
 
           {file && <div className="model-selector" role="radiogroup" aria-label="เลือกวิธีประมวลผล">
@@ -237,29 +311,38 @@ export default function App() {
               disabled={stage === 'processing' || stage === 'done'}
               onChange={(event) => { setCloudConsent(event.target.checked); setError('') }}
             />
-            <span><strong>ฉันยอมรับให้ส่งไฟล์เสียงไปประมวลผลออนไลน์</strong><span className="consent-explanation">ไฟล์เสียงและข้อความจะออกจากอุปกรณ์สำหรับงานนี้</span><small>ผู้ให้บริการ: Groq · ระยะเวลาเสียงประมาณ {Math.max(1, Math.ceil(duration / 60))} นาที</small></span>
+            <span><strong>ฉันยอมรับให้ส่งไฟล์เสียงไปประมวลผลออนไลน์</strong><span className="consent-explanation">ไฟล์เสียงและข้อความจะออกจากอุปกรณ์สำหรับงานนี้ และอาจส่งต่อไปยังบริการสำรองที่ผู้ดูแลตั้งค่าไว้</span><small>บริการที่พร้อม: {availableTranscriptionProviders.map((name) => PROVIDER_LABELS[name] ?? name).join(', ')} · สรุป: {availableReportProviders.map((name) => PROVIDER_LABELS[name] ?? name).join(', ')}{availableReportProviders.includes('gemini') ? ' · Gemini แบบฟรีอาจนำข้อมูลไปปรับปรุงบริการ' : ''}</small></span>
           </label>}
 
-          {(stage === 'processing' || stage === 'done' || (stage === 'error' && steps.some((step) => step.status === 'error'))) && <ProcessingProgress steps={steps}/>} 
+          {file && engine === 'cloud' && <details className="advanced-settings">
+            <summary>ตัวเลือกเพิ่มเติม</summary>
+            <label className="speaker-option"><input type="checkbox" checked={speakerLabels} disabled={stage === 'processing' || stage === 'done'} onChange={(event) => { setSpeakerLabels(event.target.checked); setTranscript(null); setReport(null) }}/><span><strong>ลองแยกผู้พูด</strong><small>ระบบจะพยายามใส่ “ผู้พูด 1, 2…” เมื่อบริการรองรับ</small></span></label>
+            <div className="provider-grid">
+              <label>บริการถอดเสียง<select value={transcriptionProvider} disabled={stage === 'processing' || stage === 'done'} onChange={(event) => { setTranscriptionProvider(event.target.value as CloudTranscriptionProvider); setTranscript(null); setReport(null) }}><option value="auto">อัตโนมัติ (แนะนำ)</option>{availableTranscriptionProviders.map((name) => <option value={name} key={name}>{PROVIDER_LABELS[name] ?? name}</option>)}</select></label>
+              <label>บริการทำรายงาน<select value={reportProvider} disabled={stage === 'processing' || stage === 'done'} onChange={(event) => setReportProvider(event.target.value as CloudReportProvider)}><option value="auto">อัตโนมัติ (แนะนำ)</option>{availableReportProviders.map((name) => <option value={name} key={name}>{PROVIDER_LABELS[name] ?? name}</option>)}</select></label>
+            </div>
+          </details>}
+
+          {file && (stage === 'processing' || stage === 'done' || (stage === 'error' && steps.some((step) => step.status === 'error'))) && <ProcessingProgress steps={steps}/>} 
           {error && <div className="error-box">{error}</div>}
           <button className="primary-button" disabled={!file || stage === 'processing' || stage === 'done' || (engine === 'cloud' && !cloudConsent)} onClick={processMeeting}><WandSparkles size={18}/>{stage === 'processing' ? 'กำลังประมวลผล…' : transcript && !report ? 'ลองสร้างรายงานอีกครั้ง' : stage === 'done' ? 'สร้างรายงานเรียบร้อย' : 'สร้างรายงานการประชุม'}<ChevronRight size={18}/></button>
           <div className="local-note">{cloudMode
-            ? <><Cloud size={18}/><div><strong>โหมดออนไลน์คืออะไร?</strong><span>ระบบส่งไฟล์ไปช่วยประมวลผล แล้วส่งบทถอดเสียงและรายงานกลับมาให้คุณ</span><small>Groq Cloud · Whisper Large V3 · GPT-OSS 120B</small></div></>
+            ? <><Cloud size={18}/><div><strong>โหมดออนไลน์คืออะไร?</strong><span>ระบบส่งไฟล์ไปช่วยประมวลผล แล้วส่งบทถอดเสียงและรายงานกลับมาให้คุณ หากบริการหนึ่งไม่พร้อม ระบบลองบริการสำรองให้ได้</span><small>Configured cloud providers · automatic fallback · Gemini optional</small></div></>
             : <><LockKeyhole size={18}/><div><strong>โหมดส่วนตัวคืออะไร?</strong><span>ระบบทำงานในเบราว์เซอร์นี้ ไฟล์เสียงและเนื้อหาไม่ถูกส่งออกไปที่อื่น</span><small>Offline · Whisper · Gemma · WebGPU</small></div></>}</div>
         </div>
 
         <div className="panel report-panel">
-          <div className="panel-heading"><div><span className="step">02</span><div><h2>รายงานการประชุม</h2><p>{stage === 'done' ? 'พร้อมใช้งานแล้ว' : 'ตัวอย่างรูปแบบรายงาน'}</p></div></div>{report && <button className="download-button" onClick={download}><ArrowDownToLine size={16}/> ดาวน์โหลด</button>}</div>
+          <div className="panel-heading report-heading"><div><span className="step">02</span><div><h2>รายงานการประชุม</h2><p>{stage === 'done' ? 'พร้อมใช้งานแล้ว' : 'ตัวอย่างรูปแบบรายงาน'}</p></div></div>{report && <div className="export-actions"><button onClick={() => void downloadWord(report)} title="Microsoft Word"><FileDown size={16}/> Word</button><button onClick={() => window.print()} title="พิมพ์หรือบันทึก PDF"><Printer size={16}/> PDF</button><button onClick={() => downloadMarkdown(report)} title="ไฟล์ข้อความ Markdown"><ArrowDownToLine size={16}/><span>ข้อความ</span></button></div>}</div>
           <div className="tabs"><button className={tab==='report'?'active':''} onClick={()=>setTab('report')}><FileText size={15}/> รายงาน</button><button className={tab==='transcript'?'active':''} onClick={()=>setTab('transcript')}><Users size={15}/> บทถอดเสียง</button></div>
-          {tab === 'report' ? activeReport ? <ReportView report={activeReport} muted={!report}/> : <EmptyReport stage={stage}/> : <TranscriptView transcript={transcript}/>} 
+          {tab === 'report' ? activeReport ? <ReportView report={activeReport} muted={!report}/> : <EmptyReport stage={stage}/> : <TranscriptView transcript={transcript} onChange={file ? updateTranscript : undefined} onSeek={audioUrl ? seekAudio : undefined}/>} 
         </div>
       </section>
 
       <div className="engine-note">{cloudMode
-        ? <><span>POWERED BY</span><b>Groq</b><i></i><b>Whisper Large V3</b><i></i><b>GPT-OSS 120B</b></>
+        ? <><span>ONLINE SERVICES</span><b>automatic fallback</b><i></i><b>speech-to-text</b><i></i><b>Groq / Gemini reports</b></>
         : <><span>POWERED LOCALLY BY</span><b>Gemma 4 E2B</b><i></i><b>LiteRT-LM</b><i></i><b>WebGPU</b></>}</div>
     </main>
-    <footer><span>สรุป · Local-first meeting intelligence</span><span>{cloudMode ? 'โหมดคลาวด์ผ่าน Groq · สลับเป็น Offline ได้ทุกเมื่อ' : 'ไม่มีเซิร์ฟเวอร์ · ไม่มีการติดตาม · ไม่มีข้อมูลรั่วไหล'}</span></footer>
+    <footer><span>สรุป · Local-first meeting intelligence</span><span>{cloudMode ? 'โหมดออนไลน์มีบริการสำรอง · สลับเป็นโหมดส่วนตัวได้ทุกเมื่อ' : 'ไม่มีเซิร์ฟเวอร์ · ไม่มีการติดตาม · ไม่มีข้อมูลรั่วไหล'}</span></footer>
   </div>
 }
 
@@ -310,7 +393,18 @@ function ReportView({report, muted}:{report:MeetingReport; muted:boolean}) {
   </article>
 }
 
-function TranscriptView({transcript}:{transcript:TranscriptResult|null}) {
+function TranscriptView({ transcript, onChange, onSeek }: { transcript: TranscriptResult | null; onChange?: (value: TranscriptResult) => void; onSeek?: (seconds: number) => void }) {
+  const [working, setWorking] = useState<TranscriptResult | null>(transcript)
+  useEffect(() => setWorking(transcript), [transcript])
   if (!transcript) return <div className="empty-report"><div><Users size={25}/></div><h3>ยังไม่มีบทถอดเสียง</h3><p>เลือกไฟล์และสร้างรายงาน<br/>เพื่อดูบทถอดเสียงพร้อมเวลา</p></div>
-  return <div className="transcript-content">{transcript.chunks?.length ? transcript.chunks.map((chunk,i)=><div key={i}><time>{formatDuration(chunk.timestamp[0])}</time><p>{chunk.text}</p></div>) : <p>{transcript.text}</p>}</div>
+  if (!working) return null
+  const save = () => onChange?.({ ...working, text: working.chunks?.length ? transcriptText(working.chunks) : working.text.trim() })
+  return <div className="transcript-editor">
+    <div className="transcript-help"><div><strong>{onChange ? 'ตรวจและแก้ไขก่อนทำรายงาน' : 'บทถอดเสียงที่บันทึกไว้'}</strong><span>{onChange ? 'แตะเวลาเพื่อฟังเสียงจากจุดนั้น แล้วแก้คำที่สะกดผิดได้' : 'เลือกไฟล์เสียงเดิมอีกครั้งหากต้องการฟังหรือแก้ไข'}</span></div>{working.provider && <small>{PROVIDER_LABELS[working.provider] ?? working.provider}</small>}</div>
+    <div className="transcript-content">{working.chunks?.length ? working.chunks.map((chunk, index) => <div key={index}>
+      <button className="timestamp-button" onClick={() => onSeek?.(chunk.timestamp[0])} disabled={!onSeek}><Play size={12}/>{formatDuration(chunk.timestamp[0])}</button>
+      <div>{chunk.speaker && <b className="speaker-label">{chunk.speaker}</b>}<textarea aria-label={`ข้อความช่วง ${formatDuration(chunk.timestamp[0])}`} value={chunk.text} readOnly={!onChange} onChange={(event) => setWorking({ ...working, chunks: working.chunks?.map((value, valueIndex) => valueIndex === index ? { ...value, text: event.target.value } : value) })}/></div>
+    </div>) : <textarea className="plain-transcript" value={working.text} readOnly={!onChange} onChange={(event) => setWorking({ ...working, text: event.target.value })}/>}</div>
+    {onChange && <button className="save-transcript" onClick={save}>บันทึกข้อความที่แก้ไข และสร้างรายงานใหม่</button>}
+  </div>
 }

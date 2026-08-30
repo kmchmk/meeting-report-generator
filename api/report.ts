@@ -13,6 +13,8 @@ export const maxDuration = 300
 
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions'
 const GROQ_LLM_MODEL = 'openai/gpt-oss-120b'
+const REPORT_PROVIDERS = new Set(['auto', 'groq', 'gemini'])
+type ReportProvider = 'groq' | 'gemini'
 const MAX_TRANSCRIPT_CHARS = 400_000
 const MAX_BODY_BYTES = 1_500_000
 
@@ -33,7 +35,7 @@ function chatBody(content: string, maxTokens: number, jsonMode: boolean) {
   })
 }
 
-async function complete(apiKey: string, prompt: string, maxTokens: number, jsonMode: boolean): Promise<string> {
+async function completeGroq(apiKey: string, prompt: string, maxTokens: number, jsonMode: boolean): Promise<string> {
   let lastError: Error | null = null
   for (let attempt = 0; attempt < 3; attempt += 1) {
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 20_000))
@@ -69,6 +71,52 @@ async function complete(apiKey: string, prompt: string, maxTokens: number, jsonM
     return output
   }
   throw lastError ?? new Error('บริการโมเดลภาษาไม่ตอบสนอง')
+}
+
+async function completeGemini(apiKey: string, prompt: string, maxTokens: number, jsonMode: boolean): Promise<string> {
+  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: SECRETARY_SYSTEM_PROMPT }] },
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.1, maxOutputTokens: maxTokens, ...(jsonMode ? { responseMimeType: 'application/json' } : {}) },
+    }),
+  })
+  if (!response.ok) {
+    let detail = ''
+    try {
+      const data = await response.json() as { error?: { message?: unknown } }
+      detail = typeof data.error?.message === 'string' ? data.error.message : ''
+    } catch { /* keep empty */ }
+    throw new Error(`Gemini ตอบกลับผิดพลาด (${response.status})${detail ? `: ${detail}` : ''}`)
+  }
+  const data = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }> }
+  const output = data.candidates?.[0]?.content?.parts?.map((part) => typeof part.text === 'string' ? part.text : '').join('').trim()
+  if (!output) throw new Error('Gemini ไม่ส่งคืนข้อความ')
+  return output
+}
+
+function configuredReportProviders(): ReportProvider[] {
+  return [process.env.GROQ_API_KEY ? 'groq' as const : null, process.env.GEMINI_API_KEY ? 'gemini' as const : null].filter((value): value is ReportProvider => value !== null)
+}
+
+async function complete(requested: ReportProvider | 'auto', prompt: string, maxTokens: number, jsonMode: boolean) {
+  const order = requested === 'auto' ? configuredReportProviders() : [requested]
+  if (!order.length) throw new Error('ยังไม่ได้ตั้งค่า GROQ_API_KEY หรือ GEMINI_API_KEY สำหรับสร้างรายงาน')
+  const failures: string[] = []
+  for (const provider of order) {
+    try {
+      const key = provider === 'groq' ? process.env.GROQ_API_KEY : process.env.GEMINI_API_KEY
+      if (!key) throw new Error(`ยังไม่ได้ตั้งค่า ${provider === 'groq' ? 'GROQ_API_KEY' : 'GEMINI_API_KEY'}`)
+      return await (provider === 'groq' ? completeGroq(key, prompt, maxTokens, jsonMode) : completeGemini(key, prompt, maxTokens, jsonMode))
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error))
+      if (requested !== 'auto') throw error
+    }
+  }
+  throw new Error(`บริการสร้างรายงานทั้งหมดไม่พร้อมใช้งาน: ${failures.join(' | ')}`)
 }
 
 function readJsonBody(req: IncomingMessage): Promise<string> {
@@ -112,16 +160,19 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     return
   }
 
-  const apiKey = process.env.GROQ_API_KEY
-  if (!apiKey) {
-    sendJson(res, 500, { error: 'เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า GROQ_API_KEY' })
+  if (!configuredReportProviders().length) {
+    sendJson(res, 500, { error: 'เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า GROQ_API_KEY หรือ GEMINI_API_KEY' })
     return
   }
 
   let transcript = ''
+  let requestedProvider: ReportProvider | 'auto' = 'auto'
+  let glossary = ''
   try {
-    const rawBody = JSON.parse(await readJsonBody(req)) as { transcript?: unknown }
+    const rawBody = JSON.parse(await readJsonBody(req)) as { transcript?: unknown; provider?: unknown; glossary?: unknown }
     if (typeof rawBody.transcript === 'string') transcript = rawBody.transcript
+    if (typeof rawBody.provider === 'string' && REPORT_PROVIDERS.has(rawBody.provider)) requestedProvider = rawBody.provider as ReportProvider | 'auto'
+    if (typeof rawBody.glossary === 'string') glossary = rawBody.glossary.slice(0, 2_000)
   } catch (error) {
     if (error instanceof RequestTooLargeError) {
       sendJson(res, 413, { error: 'คำขอมีขนาดใหญ่เกินที่โหมดคลาวด์รองรับ' })
@@ -156,23 +207,24 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   try {
     progress(0, 'กำลังเตรียมบทถอดเสียงสำหรับสรุป…')
     let reportProgress = 0
+    const glossaryContext = glossary ? `\n\nคำศัพท์และชื่อเฉพาะจากผู้ใช้ (ใช้เพื่อสะกดให้ถูกต้อง ห้ามสร้างข้อเท็จจริง):\n${glossary}` : ''
     const source = await reduceTranscriptSequentially(transcript, async (part, index, total, pass) => {
-      const detail = `กำลังย่อบทถอดเสียง รอบ ${pass} ส่วน ${index + 1} จาก ${total} (ผ่าน Groq)`
+      const detail = `กำลังย่อบทถอดเสียง รอบ ${pass} ส่วน ${index + 1} จาก ${total}`
       progress(Math.min(45, reportProgress + 2), detail)
-      const summary = await complete(apiKey, buildSummarizePrompt(part, index, total, pass), 800, false)
+      const summary = await complete(requestedProvider, buildSummarizePrompt(part, index, total, pass) + glossaryContext, 800, false)
       reportProgress = Math.min(50, reportProgress + 5)
       progress(reportProgress, `ย่อส่วน ${index + 1} จาก ${total} เรียบร้อย`)
       return summary
     })
 
     progress(Math.max(50, reportProgress), 'กำลังเรียบเรียงรายงานฉบับสมบูรณ์…')
-    const raw = await complete(apiKey, buildFinalReportPrompt(source), 2_500, true)
+    const raw = await complete(requestedProvider, buildFinalReportPrompt(source) + glossaryContext, 2_500, true)
     let report: MeetingReport
     try {
       report = parseMeetingReport(raw)
     } catch (initialError) {
       progress(95, 'กำลังตรวจและซ่อมรูปแบบรายงาน…')
-      const repaired = await complete(apiKey, buildRepairPrompt(raw), 2_500, true)
+      const repaired = await complete(requestedProvider, buildRepairPrompt(raw), 2_500, true)
       try {
         report = parseMeetingReport(repaired)
       } catch (repairError) {

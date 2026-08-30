@@ -21,7 +21,7 @@ describe('processing progress', () => {
   it('omits model download steps in cloud mode and normalizes overall progress', () => {
     const steps = createProgressSteps('cloud')
     expect(steps.map((step) => step.id)).toEqual(['audio', 'transcription', 'report'])
-    expect(steps[1].label).toBe('ถอดเสียงผ่านคลาวด์ (Groq)')
+    expect(steps[1].label).toBe('ถอดเสียงผ่านบริการออนไลน์')
     steps[1].status = 'active'
     steps[1].progress = 50
     expect(calculateOverallProgress(steps)).toBeCloseTo(100 * (30 * 0.5) / 45, 5)

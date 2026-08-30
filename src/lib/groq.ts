@@ -1,8 +1,10 @@
 import type { ProgressEvent } from '../progress'
-import type { TranscriptResult } from '../types'
+import type { CloudReportProvider, CloudTranscriptionProvider, TranscriptChunk, TranscriptResult } from '../types'
 import { validateMeetingReport, type MeetingReport } from '../../api/_lib/report-core'
+import { createOverlappingSlices, isSilentAudio, mergeTranscriptChunks, transcriptText } from './transcript'
 
 export const SAMPLE_RATE = 16_000
+// Kept for the generic fixed-size helper; the live cloud pipeline uses 55-second overlapping slices.
 export const CHUNK_SECONDS = 100
 
 export function floatToInt16(samples: Float32Array): Int16Array {
@@ -101,25 +103,51 @@ function requestFailure(error: unknown): Error {
 export async function transcribeRemote(
   samples: Float32Array,
   onProgress: (event: ProgressEvent) => void,
+  options: {
+    provider?: CloudTranscriptionProvider
+    glossary?: string
+    diarization?: boolean
+    resumeChunks?: Record<number, TranscriptChunk[]>
+    onPartial?: (index: number, chunks: TranscriptChunk[]) => void
+  } = {},
 ): Promise<TranscriptResult> {
-  onProgress({ step: 'whisper-model', progress: 100, status: 'done', detail: 'ถอดเสียงผ่าน Whisper Large V3 บนคลาวด์' })
-  const chunks = chunkSamples(samples)
-  const texts: string[] = []
+  const requestedProvider = options.provider ?? 'auto'
+  onProgress({ step: 'whisper-model', progress: 100, status: 'done', detail: 'บริการถอดเสียงออนไลน์พร้อมใช้งาน' })
+  const slices = createOverlappingSlices(samples)
+  const collected: TranscriptChunk[] = []
+  let actualProvider = requestedProvider
   try {
-    for (let index = 0; index < chunks.length; index += 1) {
-      const base = index / chunks.length * 100
+    for (let index = 0; index < slices.length; index += 1) {
+      const slice = slices[index]
+      const base = index / slices.length * 100
+      const resumed = options.resumeChunks?.[index]
+      if (options.resumeChunks && index in options.resumeChunks) {
+        collected.push(...(resumed ?? []))
+        onProgress({ step: 'transcription', progress: Math.round((index + 1) / slices.length * 100), status: 'active', detail: `ใช้ผลที่บันทึกไว้ช่วง ${index + 1} จาก ${slices.length}` })
+        continue
+      }
+      if (isSilentAudio(slice.samples)) {
+        options.onPartial?.(index, [])
+        onProgress({ step: 'transcription', progress: Math.round((index + 1) / slices.length * 100), status: 'active', detail: `ข้ามช่วงเงียบ ${index + 1} จาก ${slices.length}` })
+        continue
+      }
       onProgress({
         step: 'transcription',
         progress: Math.round(base),
         status: 'active',
-        detail: chunks.length > 1 ? `กำลังส่งช่วงเสียง ${index + 1} จาก ${chunks.length} ไปถอดเสียง…` : 'กำลังส่งเสียงไปถอดข้อความ…',
+        detail: slices.length > 1 ? `กำลังถอดเสียงช่วง ${index + 1} จาก ${slices.length}…` : 'กำลังส่งเสียงไปถอดข้อความ…',
       })
       let response: Response | null = null
       for (let attempt = 0; attempt < 3; attempt += 1) {
         response = await fetch('/api/transcribe', {
           method: 'POST',
-          headers: { 'content-type': 'audio/wav' },
-          body: encodeWav(chunks[index]),
+          headers: {
+            'content-type': 'audio/wav',
+            'x-transcription-provider': requestedProvider,
+            'x-speaker-labels': options.diarization ? 'true' : 'false',
+            ...(options.glossary ? { 'x-meeting-glossary': encodeURIComponent(options.glossary.slice(0, 1_000)) } : {}),
+          },
+          body: encodeWav(slice.samples),
         })
         if (response.status !== 429 || attempt === 2) break
         const waitMs = retryDelayMs(response.headers.get('retry-after'))
@@ -133,23 +161,41 @@ export async function transcribeRemote(
       }
       if (!response) throw new Error('ไม่ได้รับคำตอบจากบริการถอดเสียง')
       if (!response.ok) throw new Error(await readErrorMessage(response) ?? `ถอดเสียงผ่านคลาวด์ไม่สำเร็จ (${response.status})`)
-      const data = await response.json() as { text?: unknown }
+      const data = await response.json() as { text?: unknown; provider?: unknown; segments?: unknown }
       if (typeof data.text !== 'string') throw new Error('คำตอบการถอดเสียงจากเซิร์ฟเวอร์ไม่ถูกต้อง')
-      texts.push(data.text.trim())
+      if (typeof data.provider === 'string') actualProvider = data.provider as CloudTranscriptionProvider
+      const remoteSegments = Array.isArray(data.segments) ? data.segments : []
+      const parsedSegments: TranscriptChunk[] = remoteSegments.flatMap((value) => {
+        if (!value || typeof value !== 'object') return []
+        const item = value as Record<string, unknown>
+        if (typeof item.text !== 'string') return []
+        const start = typeof item.start === 'number' ? item.start : 0
+        const end = typeof item.end === 'number' ? item.end : slice.endSeconds - slice.startSeconds
+        return [{
+          text: item.text.trim(),
+          timestamp: [slice.startSeconds + start, Math.min(slice.endSeconds, slice.startSeconds + end)] as [number, number],
+          ...(typeof item.speaker === 'string' ? { speaker: item.speaker } : {}),
+          ...(typeof item.confidence === 'number' ? { confidence: item.confidence } : {}),
+        }]
+      })
+      const completed = parsedSegments.length ? parsedSegments : data.text.trim() ? [{ text: data.text.trim(), timestamp: [slice.startSeconds, slice.endSeconds] as [number, number] }] : []
+      collected.push(...completed)
+      options.onPartial?.(index, completed)
       onProgress({
         step: 'transcription',
-        progress: Math.min(99, Math.round((index + 1) / chunks.length * 100)),
+        progress: Math.min(99, Math.round((index + 1) / slices.length * 100)),
         status: 'active',
-        detail: chunks.length > 1 ? `ถอดเสียงครบ ${index + 1} จาก ${chunks.length} ช่วง` : 'ถอดเสียงเรียบร้อย',
+        detail: slices.length > 1 ? `ถอดเสียงครบ ${index + 1} จาก ${slices.length} ช่วง` : 'ถอดเสียงเรียบร้อย',
       })
     }
   } catch (error) {
     throw requestFailure(error)
   }
   onProgress({ step: 'transcription', progress: 100, status: 'done', detail: 'ถอดเสียงเรียบร้อย' })
-  const text = texts.filter(Boolean).join('\n').trim()
+  const chunks = mergeTranscriptChunks(collected)
+  const text = transcriptText(chunks).trim()
   if (!text) throw new Error('ไม่พบเสียงพูดที่ถอดได้ในไฟล์นี้')
-  return { text }
+  return { text, chunks, provider: actualProvider }
 }
 
 export type ReportStreamEvent =
@@ -171,15 +217,16 @@ function parseStreamEvent(value: unknown): ReportStreamEvent | null {
 export async function generateReportRemote(
   transcript: string,
   onProgress: (event: ProgressEvent) => void,
+  options: { provider?: CloudReportProvider; glossary?: string } = {},
 ): Promise<MeetingReport> {
-  onProgress({ step: 'gemma-download', progress: 100, status: 'done', detail: 'ใช้โมเดลภาษาบนคลาวด์ (Groq)' })
+  onProgress({ step: 'gemma-download', progress: 100, status: 'done', detail: 'ใช้โมเดลภาษาออนไลน์ที่ตั้งค่าไว้' })
   onProgress({ step: 'gemma-compile', progress: 100, status: 'done', detail: 'ไม่ต้องเตรียมโมเดลบนเครื่อง' })
   let response: Response
   try {
     response = await fetch('/api/report', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ transcript }),
+      body: JSON.stringify({ transcript, provider: options.provider ?? 'auto', glossary: options.glossary ?? '' }),
     })
   } catch (error) {
     throw requestFailure(error)

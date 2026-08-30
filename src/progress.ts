@@ -47,7 +47,7 @@ export function createProgressSteps(mode: EngineMode = 'local', completedThrough
   return visibleSteps
     .map(({ id, label }, index) => ({
       id,
-      label: mode === 'cloud' && id === 'transcription' ? 'ถอดเสียงผ่านคลาวด์ (Groq)' : label,
+      label: mode === 'cloud' && id === 'transcription' ? 'ถอดเสียงผ่านบริการออนไลน์' : label,
       detail: index <= completedIndex ? 'พร้อมใช้งานแล้ว' : 'รอดำเนินการ',
       progress: index <= completedIndex ? 100 : 0,
       status: index <= completedIndex ? 'done' : 'pending',
